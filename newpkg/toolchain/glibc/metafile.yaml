@@ -58,7 +58,9 @@ bootstrap_tools:
 
 # Patches aplicados (exemplo: patch FHS) — se necessário
 patches:
-  - glibc-2.42-fhs-1.patch
+  - url: https://www.linuxfromscratch.org/patches/lfs/12.1/glibc-2.42-fhs-1.patch
+    sha256: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+    strip: 1
 
 # Comandos de build
 build:
