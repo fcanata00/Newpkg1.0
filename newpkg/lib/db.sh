@@ -1,30 +1,13 @@
 #!/usr/bin/env bash
-# db.sh - simple package metadata DB for newpkg
-# Requirements: bash, jq, tar, zstd (optional for backup)
+# db.sh - package metadata DB for newpkg (with incremental index + hooks + backups)
+# Requires: bash, jq, tar, (zstd optional), realpath optional
 #
-# Usage: db.sh <command> [args...]
-# Commands:
-#   init
-#   add <manifest.json> [--replace]
-#   remove <pkg|pkg-version> [--force]
-#   query <pkg|pkg-version> [--json] [--field FIELD] [--files]
-#   list [--stage <stage>] [--json] [--count]
-#   revdeps <pkg>
-#   provides <file-path>
-#   backup
-#   restore <backup-file>
-#   verify <pkg|pkg-version>
-#   orphans
-#   search <term>
-#   size <pkg|pkg-version>
-#   help
-#
-# Author: Generated for user
-# Date: 2025-10-08
+# Save: /usr/lib/newpkg/db.sh
+# Make executable: chmod +x /usr/lib/newpkg/db.sh
 
 set -o errexit
-set -o pipefail
 set -o nounset
+set -o pipefail
 
 ###########################
 # Configuration & globals
@@ -34,14 +17,16 @@ set -o nounset
 : "${NPKG_LOG_DIR:=/var/log/newpkg}"
 : "${NPKG_HOOKS_DIR:=/etc/newpkg/hooks}"
 : "${DB_BACKUP_KEEP:=5}"
+INDEX_FILE="${NPKG_DB_DIR}/index.json"
 
 # Tools
 JQ_BIN="$(command -v jq || true)"
 TAR_BIN="$(command -v tar || true)"
 ZSTD_BIN="$(command -v zstd || true)"
+REALPATH_BIN="$(command -v realpath || true)"
 SHA256SUM_BIN="$(command -v sha256sum || true)"
 
-# Ensure required tools
+# Ensure required tool jq
 if [[ -z "$JQ_BIN" ]]; then
   echo "ERROR: 'jq' is required but not found in PATH." >&2
   exit 1
@@ -51,35 +36,36 @@ if [[ -z "$TAR_BIN" ]]; then
   exit 1
 fi
 
-###########################
-# Logging helpers
-###########################
+# Attempt to source log.sh if present
+if [[ -f "/usr/lib/newpkg/log.sh" ]]; then
+  # shellcheck source=/usr/lib/newpkg/log.sh
+  source /usr/lib/newpkg/log.sh || true
+elif [[ -f "/etc/newpkg/log.sh" ]]; then
+  # shellcheck source=/etc/newpkg/log.sh
+  source /etc/newpkg/log.sh || true
+fi
+
+# Fallback logging if log.sh didn't define functions
 _log() {
-  local level="$1"; shift
-  local msg="$*"
-  # If an external log function exists (from log.sh), use it
-  if declare -F log_info >/dev/null 2>&1 && [[ "$level" == "INFO" ]]; then
-    log_info "$msg" || true
-    return 0
+  local lvl="$1"; shift
+  if declare -F log_info >/dev/null 2>&1 && [[ "$lvl" == "INFO" ]]; then
+    log_info "$*" || true; return
   fi
-  if declare -F log_warn >/dev/null 2>&1 && [[ "$level" == "WARN" ]]; then
-    log_warn "$msg" || true
-    return 0
+  if declare -F log_warn >/dev/null 2>&1 && [[ "$lvl" == "WARN" ]]; then
+    log_warn "$*" || true; return
   fi
-  if declare -F log_error >/dev/null 2>&1 && [[ "$level" == "ERROR" ]]; then
-    log_error "$msg" || true
-    return 0
+  if declare -F log_error >/dev/null 2>&1 && [[ "$lvl" == "ERROR" ]]; then
+    log_error "$*" || true; return
   fi
-  # Fallback to echo with prefix
-  case "$level" in
-    INFO)  echo "[INFO]  $msg" ;;
-    WARN)  echo "[WARN]  $msg" >&2 ;;
-    ERROR) echo "[ERROR] $msg" >&2 ;;
-    DEBUG) [[ "${DB_DEBUG:-0}" -eq 1 ]] && echo "[DEBUG] $msg" ;; 
-    *)     echo "[LOG]   $msg" ;;
+  # fallback simple
+  case "$lvl" in
+    INFO) printf '[INFO] %s\n' "$*" ;;
+    WARN) printf '[WARN] %s\n' "$*" >&2 ;;
+    ERROR) printf '[ERROR] %s\n' "$*" >&2 ;;
+    DEBUG) [[ "${NPKG_DEBUG:-0}" -eq 1 ]] && printf '[DEBUG] %s\n' "$*" ;;
+    *) printf '%s\n' "$*" ;;
   esac
 }
-
 log_info()  { _log INFO "$*"; }
 log_warn()  { _log WARN "$*"; }
 log_error() { _log ERROR "$*"; }
@@ -95,84 +81,61 @@ ensure_dir() {
   fi
 }
 
-timestamp() {
-  date -u +"%Y%m%dT%H%M%SZ"
+timestamp() { date -u +"%Y%m%dT%H%M%SZ"; }
+
+canonicalize() {
+  local p="$1"
+  if [[ -n "$REALPATH_BIN" ]]; then
+    "$REALPATH_BIN" -m -- "$p"
+  else
+    echo "$(cd "$(dirname "$p")" 2>/dev/null || pwd)/$(basename "$p")"
+  fi
 }
 
-# run hooks if present: $1 = hook-name (e.g. db_add), rest are args
 run_hooks() {
   local hookname="$1"; shift
   local dir="$NPKG_HOOKS_DIR/$hookname"
   if [[ -d "$dir" ]]; then
     log_debug "Running hooks in $dir"
-    # Execute scripts in numeric order
     local hook
     for hook in "$dir"/*; do
       [[ -x "$hook" ]] || continue
       log_info "hook: running $hook"
       "$hook" "$@" || {
         log_warn "hook $hook returned non-zero"
-        # Continue on non-zero for now — user can change hook behavior.
+        # do not abort by default
       }
     done
   fi
 }
 
-# safe canonical path
-canonicalize() {
-  local p="$1"
-  if command -v realpath >/dev/null 2>&1; then
-    realpath -m -- "$p"
-  else
-    # fallback: basic normalization
-    echo "$(cd "$(dirname "$p")" 2>/dev/null || pwd)/$(basename "$p")"
-  fi
+# Atomic write helper for JSON files
+_atomic_write() {
+  local src_content="$1"
+  local dest="$2"
+  local tmp
+  tmp="$(mktemp "${dest}.tmp.XXXX")"
+  printf '%s' "$src_content" >"$tmp"
+  sync "$tmp" || true
+  mv -f "$tmp" "$dest"
 }
 
 ###########################
-# DB primitives
+# DB primitives + Index
 ###########################
 db_init() {
   ensure_dir "$NPKG_DB_DIR"
   ensure_dir "$NPKG_DB_BACKUP_DIR"
   ensure_dir "$NPKG_LOG_DIR"
-  # Ensure ownership/perms (root user expected)
+  # ensure index exists
+  if [[ ! -f "$INDEX_FILE" ]]; then
+    printf '[]' >"$INDEX_FILE"
+  fi
   chmod 0755 "$NPKG_DB_DIR" || true
   chmod 0755 "$NPKG_DB_BACKUP_DIR" || true
-  log_info "DB initialized at $NPKG_DB_DIR"
+  log_info "DB initialized at $NPKG_DB_DIR (index: $INDEX_FILE)"
 }
 
-# internal: find manifest file(s) for pkg or pkg-version
-# arg: name or name-version or pattern
-_find_manifests() {
-  local q="$1"
-  # exact if contains '/'
-  if [[ "$q" == */* ]]; then
-    # treat as path-like origin -> search manifests with origin matching
-    # scanning manifests for origin equals q
-    jq -r --arg o "$q" 'select(.origin==$o) | @sh "\(.name)-\(.version).json"' "$NPKG_DB_DIR"/*.json 2>/dev/null || true
-    return
-  fi
-
-  # if contains '-' and a .json exists exactly: assume name-version
-  if [[ "$q" == *-* ]]; then
-    if [[ -f "$NPKG_DB_DIR/$q.json" ]]; then
-      printf '%s\n' "$NPKG_DB_DIR/$q.json"
-      return
-    fi
-  fi
-
-  # otherwise, search manifests where .name == q
-  local f
-  for f in "$NPKG_DB_DIR"/*.json; do
-    [[ -f "$f" ]] || continue
-    if "$JQ_BIN" -e --arg n "$q" '.name == $n' "$f" >/dev/null 2>&1; then
-      printf '%s\n' "$f"
-    fi
-  done
-}
-
-# validate that manifest contains required fields
 _validate_manifest() {
   local manifest="$1"
   if ! "$JQ_BIN" -e '.name and .version and .files' "$manifest" >/dev/null 2>&1; then
@@ -182,11 +145,82 @@ _validate_manifest() {
   return 0
 }
 
-# Add manifest: copy to db dir; options: --replace
+# rebuild index scanning all manifests
+db_reindex() {
+  log_info "Rebuilding index from manifests in $NPKG_DB_DIR..."
+  local tmp
+  tmp="$(mktemp "${INDEX_FILE}.tmp.XXXX")"
+  printf '%s\n' "[" >"$tmp"
+  local first=1
+  local f
+  for f in "$NPKG_DB_DIR"/*.json; do
+    [[ -f "$f" ]] || continue
+    # create index entry
+    local entry
+    entry="$("$JQ_BIN" -c '{name: .name, version: .version, origin: (.origin // ""), provides: (.provides // []), depends: (.depends // {}), stage: (.stage // "normal"), manifest: ( .name + "-" + .version + ".json") }' "$f")"
+    if [[ $first -eq 1 ]]; then
+      printf '%s' "$entry" >>"$tmp"
+      first=0
+    else
+      printf ',%s' "$entry" >>"$tmp"
+    fi
+  done
+  printf ']' >>"$tmp"
+  mv -f "$tmp" "$INDEX_FILE"
+  log_info "Index rebuilt: $(wc -c <"$INDEX_FILE") bytes"
+  run_hooks db_reindex "$INDEX_FILE"
+}
+
+# internal: add/update index entry (atomic)
+_index_add_or_replace() {
+  local manifest_path="$1"  # full path to manifest file in db dir
+  if [[ ! -f "$manifest_path" ]]; then
+    log_warn "Index add: manifest not present: $manifest_path"
+    return 1
+  fi
+  local name version
+  name="$("$JQ_BIN" -r '.name' "$manifest_path")"
+  version="$("$JQ_BIN" -r '.version' "$manifest_path")"
+  local entry
+  entry="$("$JQ_BIN" -c '{name: .name, version: .version, origin: (.origin // ""), provides: (.provides // []), depends: (.depends // {}), stage: (.stage // "normal"), manifest: (.name + "-" + .version + ".json") }' "$manifest_path")"
+
+  # build new index by reading existing and filtering out same name-version then appending entry
+  local tmp
+  tmp="$(mktemp "${INDEX_FILE}.tmp.XXXX")"
+  "$JQ_BIN" -c --argjson new "$entry" '. as $idx | map(select(.name != $new.name or .version != $new.version)) + [$new]' "$INDEX_FILE" >"$tmp" || {
+    # if jq fails (e.g., empty index), simply write [entry]
+    printf '[%s]\n' "$entry" >"$tmp"
+  }
+  mv -f "$tmp" "$INDEX_FILE"
+  log_debug "Index updated (add/replace) for $name-$version"
+}
+
+# internal: remove index entries matching name or name-version
+_index_remove() {
+  local query="$1"  # name or name-version
+  local pattern_name pattern_name_version
+  if [[ "$query" == *-* ]]; then
+    pattern_name_version="$query"
+    pattern_name="${query%%-*}"
+  else
+    pattern_name="$query"
+    pattern_name_version=""
+  fi
+  local tmp
+  tmp="$(mktemp "${INDEX_FILE}.tmp.XXXX")"
+  if [[ -n "$pattern_name_version" ]]; then
+    "$JQ_BIN" 'map(select(.name + "-" + .version != "'"$pattern_name_version"'"))' "$INDEX_FILE" >"$tmp"
+  else
+    "$JQ_BIN" 'map(select(.name != "'"$pattern_name"'"))' "$INDEX_FILE" >"$tmp"
+  fi
+  mv -f "$tmp" "$INDEX_FILE"
+  log_debug "Index remove applied for query=$query"
+}
+
+# copy manifest into db dir and update index; options: --replace
 db_add() {
   local manifest="$1"; shift
   local replace="no"
-
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --replace) replace="yes"; shift ;;
@@ -198,7 +232,6 @@ db_add() {
     log_error "Manifest not found: $manifest"
     return 3
   fi
-
   _validate_manifest "$manifest" || return $?
 
   local name version dest
@@ -222,7 +255,10 @@ db_add() {
     return 4
   }
 
-  # Run hooks for db_add if present
+  # Update index
+  _index_add_or_replace "$dest"
+
+  # post-add hooks
   run_hooks db_add "$dest"
 
   log_info "Added package manifest: $name-$version"
@@ -243,7 +279,7 @@ db_backup_single() {
     return 1
   }
   # maintain only DB_BACKUP_KEEP recent files
-  (cd "$NPKG_DB_BACKUP_DIR" && ls -1t | tail -n +"$((DB_BACKUP_KEEP+1))" | xargs -r rm -f) || true
+  (cd "$NPKG_DB_BACKUP_DIR" && ls -1t 2>/dev/null | tail -n +"$((DB_BACKUP_KEEP+1))" | xargs -r rm -f) || true
 }
 
 # Remove: pkg or pkg-version
@@ -257,36 +293,54 @@ db_remove() {
     esac
   done
 
-  # find manifests
-  local found=()
-  while IFS= read -r m; do
-    [[ -n "$m" ]] || continue
-    found+=("$m")
-  done < <(_find_manifests "$target")
+  # collect manifests matching query
+  local matches=()
+  if [[ -f "$NPKG_DB_DIR/$target.json" ]]; then
+    matches+=("$NPKG_DB_DIR/$target.json")
+  else
+    # match by name
+    for f in "$NPKG_DB_DIR/$target-"*.json; do
+      [[ -f "$f" ]] || continue
+      matches+=("$f")
+    done
+    # try exact name (single version) search
+    for f in "$NPKG_DB_DIR"/*.json; do
+      [[ -f "$f" ]] || continue
+      if "$JQ_BIN" -e --arg n "$target" '.name == $n' "$f" >/dev/null 2>&1; then
+        matches+=("$f")
+      fi
+    done
+  fi
 
-  if [[ "${#found[@]}" -eq 0 ]]; then
+  if [[ "${#matches[@]}" -eq 0 ]]; then
     log_error "No manifests found for '$target'"
     return 2
   fi
 
-  # If multiple found and not force, prompt / error
-  if [[ "${#found[@]}" -gt 1 && "$force" != "yes" ]]; then
+  if [[ "${#matches[@]}" -gt 1 && "$force" != "yes" ]]; then
     log_warn "Multiple versions found for '$target':"
-    for m in "${found[@]}"; do
+    for m in "${matches[@]}"; do
       echo "  - $(basename "$m")"
     done
     log_warn "Use --force to remove all versions or specify name-version"
     return 1
   fi
 
-  # Move manifests to backup dir
-  for m in "${found[@]}"; do
+  for m in "${matches[@]}"; do
+    # backup then remove file
     db_backup_single "$m" || {
       log_warn "Failed to backup $m; skipping removal"
       continue
     }
-    log_info "Removed manifest $(basename "$m") (moved to backup)"
+    local base
+    base="$(basename "$m")"
+    # update index
+    local qname
+    qname="$("$JQ_BIN" -r '.name + "-" + .version' "$m")"
+    _index_remove "$qname"
+    # run hooks with original manifest path
     run_hooks db_remove "$m"
+    log_info "Removed manifest $base (moved to backup)"
   done
   return 0
 }
@@ -307,45 +361,100 @@ db_query() {
     esac
   done
 
-  local manifests
-  manifests=()
-  while IFS= read -r m; do
-    [[ -n "$m" ]] || continue
-    manifests+=("$m")
-  done < <(_find_manifests "$target")
+  # If a direct filename
+  if [[ -f "$NPKG_DB_DIR/$target.json" ]]; then
+    if [[ "$out_json" == "yes" ]]; then
+      cat "$NPKG_DB_DIR/$target.json"
+      return 0
+    fi
+    target="$(jq -r '.name' "$NPKG_DB_DIR/$target.json")"
+  fi
 
-  if [[ "${#manifests[@]}" -eq 0 ]]; then
+  # search by name: prefer index for speed
+  if [[ -f "$INDEX_FILE" ]]; then
+    local hits
+    hits="$("$JQ_BIN" -c --arg n "$target" 'map(select(.name == $n))' "$INDEX_FILE")"
+    if [[ "$hits" != "[]" ]]; then
+      # iterate hits
+      echo "$hits" | while IFS= read -r item; do
+        local manifest_file
+        manifest_file="$NPKG_DB_DIR/$(echo "$item" | "$JQ_BIN" -r '.manifest')"
+        if [[ ! -f "$manifest_file" ]]; then
+          # manifest missing — schedule reindex maybe
+          log_warn "Manifest referenced in index missing: $manifest_file"
+          continue
+        fi
+        if [[ "$out_json" == "yes" ]]; then
+          cat "$manifest_file"
+          continue
+        fi
+        if [[ -n "$field" ]]; then
+          "$JQ_BIN" -r --arg f "$field" '.[$f] // empty' "$manifest_file" || true
+          continue
+        fi
+        if [[ "$files_only" == "yes" ]]; then
+          if "$JQ_BIN" -e '.files[0] | type == "object"' "$manifest_file" >/dev/null 2>&1; then
+            "$JQ_BIN" -r '.files[] | .path' "$manifest_file" || true
+          else
+            "$JQ_BIN" -r '.files[]' "$manifest_file" || true
+          fi
+          continue
+        fi
+        # pretty print basic info
+        local name ver origin stage install_prefix build_date
+        name="$("$JQ_BIN" -r '.name' "$manifest_file")"
+        ver="$("$JQ_BIN" -r '.version' "$manifest_file")"
+        origin="$("$JQ_BIN" -r '.origin // empty' "$manifest_file")"
+        stage="$("$JQ_BIN" -r '.stage // empty' "$manifest_file")"
+        install_prefix="$("$JQ_BIN" -r '.install_prefix // empty' "$manifest_file")"
+        build_date="$("$JQ_BIN" -r '.build_date // empty' "$manifest_file")"
+        cat <<EOF
+Package: $name
+Version: $ver
+Origin:  $origin
+Stage:   $stage
+Prefix:  $install_prefix
+Built:   $build_date
+Manifest: $(canonicalize "$manifest_file")
+EOF
+        echo "----"
+      done
+      return 0
+    fi
+  fi
+
+  # fallback: scan manifests (slower)
+  local found=()
+  for f in "$NPKG_DB_DIR"/*.json; do
+    [[ -f "$f" ]] || continue
+    if "$JQ_BIN" -e --arg n "$target" '.name == $n or (.name + "-" + .version) == $n' "$f" >/dev/null 2>&1; then
+      found+=("$f")
+    fi
+  done
+
+  if [[ "${#found[@]}" -eq 0 ]]; then
     log_error "No manifest found for '$target'"
     return 2
   fi
 
-  if [[ "$out_json" == "yes" && "${#manifests[@]}" -eq 1 ]]; then
-    cat "${manifests[0]}"
+  if [[ "$out_json" == "yes" && "${#found[@]}" -eq 1 ]]; then
+    cat "${found[0]}"
     return 0
   fi
 
-  # If field requested
-  if [[ -n "$field" ]]; then
-    for m in "${manifests[@]}"; do
+  for m in "${found[@]}"; do
+    if [[ -n "$field" ]]; then
       "$JQ_BIN" -r --arg f "$field" '.[$f] // empty' "$m" || true
-    done
-    return 0
-  fi
-
-  if [[ "$files_only" == "yes" ]]; then
-    for m in "${manifests[@]}"; do
-      # files may be array of strings or array of objects with path
-      if "$JQ_BIN" -e '.files[0] | type == "object"' "${m}" >/dev/null 2>&1; then
+      continue
+    fi
+    if [[ "$files_only" == "yes" ]]; then
+      if "$JQ_BIN" -e '.files[0] | type == "object"' "$m" >/dev/null 2>&1; then
         "$JQ_BIN" -r '.files[] | .path' "$m" || true
       else
         "$JQ_BIN" -r '.files[]' "$m" || true
       fi
-    done
-    return 0
-  fi
-
-  # Pretty print basic info
-  for m in "${manifests[@]}"; do
+      continue
+    fi
     local name ver origin stage install_prefix build_date
     name="$("$JQ_BIN" -r '.name' "$m")"
     ver="$("$JQ_BIN" -r '.version' "$m")"
@@ -360,18 +469,17 @@ Origin:  $origin
 Stage:   $stage
 Prefix:  $install_prefix
 Built:   $build_date
-Manifest: $(realpath "$m")
+Manifest: $(canonicalize "$m")
 EOF
     echo "----"
   done
 }
 
-# list packages
+# list packages (with optional stage filter)
 db_list() {
   local stage_filter=""
   local out_json="no"
   local count_only="no"
-
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --stage) stage_filter="$2"; shift 2 ;;
@@ -381,104 +489,57 @@ db_list() {
     esac
   done
 
-  local manifests=()
-  local f
-  for f in "$NPKG_DB_DIR"/*.json; do
-    [[ -f "$f" ]] || continue
-    manifests+=("$f")
-  done
-
-  if [[ -z "$stage_filter" ]]; then
-    if [[ "$out_json" == "yes" ]]; then
-      "$JQ_BIN" -s '.' "${manifests[@]}" 2>/dev/null || echo '[]'
-      return 0
+  if [[ "$out_json" == "yes" ]]; then
+    if [[ -n "$stage_filter" ]]; then
+      "$JQ_BIN" --arg s "$stage_filter" 'map(select(.stage == $s))' "$INDEX_FILE"
+    else
+      cat "$INDEX_FILE"
     fi
-    if [[ "$count_only" == "yes" ]]; then
-      echo "${#manifests[@]}"
-      return 0
-    fi
-    for f in "${manifests[@]}"; do
-      echo "$(jq -r '.name + "-" + .version' "$f")"
-    done
     return 0
   fi
 
-  # filter by stage
-  local results=()
-  for f in "${manifests[@]}"; do
-    if "$JQ_BIN" -e --arg s "$stage_filter" '.stage == $s' "$f" >/dev/null 2>&1; then
-      results+=("$f")
-    fi
-  done
-
-  if [[ "$out_json" == "yes" ]]; then
-    if [[ "${#results[@]}" -gt 0 ]]; then
-      "$JQ_BIN" -s '.' "${results[@]}" 2>/dev/null || echo '[]'
-    else
-      echo '[]'
-    fi
+  if [[ -n "$stage_filter" ]]; then
+    "$JQ_BIN" -r --arg s "$stage_filter" '.[] | select(.stage == $s) | .name + "-" + .version' "$INDEX_FILE"
     return 0
   fi
 
   if [[ "$count_only" == "yes" ]]; then
-    echo "${#results[@]}"
+    "$JQ_BIN" 'length' "$INDEX_FILE"
     return 0
   fi
 
-  for f in "${results[@]}"; do
-    echo "$(jq -r '.name + "-" + .version' "$f")"
-  done
+  "$JQ_BIN" -r '.[] | .name + "-" + .version' "$INDEX_FILE"
 }
 
-# revdeps: list packages that depend on target
+# revdeps: use index for faster lookup
 db_revdeps() {
   local target="$1"
-  local manifests=()
-  local f
-  for f in "$NPKG_DB_DIR"/*.json; do
-    [[ -f "$f" ]] || continue
-    manifests+=("$f")
-  done
-
-  local res=()
-  for f in "${manifests[@]}"; do
-    # check build deps and run deps and provides
-    if "$JQ_BIN" -e --arg t "$target" '(.depends.build // []) + (.depends.run // []) | index($t) != null' "$f" >/dev/null 2>&1; then
-      res+=("$f")
-      continue
-    fi
-    # Additionally, check for requirements with versions like "libfoo>=1.0"
-    if "$JQ_BIN" -e --arg t "$target" '((.depends.build // []) + (.depends.run // [])) | map(split(/[<>=]/)[0]) | index($t) != null' "$f" >/dev/null 2>&1; then
-      res+=("$f")
-      continue
-    fi
-  done
-
-  for f in "${res[@]}"; do
-    echo "$(jq -r '.name + "-" + .version' "$f")"
-  done
+  # look for packages where depends.build or depends.run contain the target (naive matching)
+  "$JQ_BIN" -r --arg t "$target" '
+    .[] |
+    select(
+      ( .depends.build? // [] | map( (.|tostring) ) | index($t) != null )
+      or
+      ( .depends.run? // [] | map( (.|tostring) ) | index($t) != null )
+      or
+      ( .provides? // [] | index($t) != null )
+    )
+    | .name + "-" + .version
+  ' "$INDEX_FILE"
 }
 
-# provides: find which package provides a given installed file path
+# provides: lookup package by file path by scanning manifests (index doesn't store file lists)
 db_provides() {
   local filepath="$1"
-  local manifests=()
   for f in "$NPKG_DB_DIR"/*.json; do
     [[ -f "$f" ]] || continue
-    # if files are objects with path field
-    if "$JQ_BIN" -e --arg p "$filepath" '.files[0] | type == "object"' "$f" >/dev/null 2>&1; then
-      if "$JQ_BIN" -e --arg p "$filepath" 'any(.files[]; .path == $p)' "$f" >/dev/null 2>&1; then
-        echo "$(jq -r '.name + "-" + .version' "$f")"
-      fi
-    else
-      if "$JQ_BIN" -e --arg p "$filepath" 'any(.files[]; . == $p)' "$f" >/dev/null 2>&1; then
-        echo "$(jq -r '.name + "-" + .version' "$f")"
-      fi
+    if "$JQ_BIN" -e --arg p "$filepath" 'any(.files[]; type=="object" and .path == $p) or any(.files[]; . == $p)' "$f" >/dev/null 2>&1; then
+      echo "$(jq -r '.name + "-" + .version' "$f")"
     fi
   done
 }
 
-# backup entire DB
+# backup entire DB (tar + optional zstd)
 db_backup() {
   ensure_dir "$NPKG_DB_BACKUP_DIR"
   local ts
@@ -500,17 +561,15 @@ db_backup() {
   # rotate backups
   (cd "$NPKG_DB_BACKUP_DIR" && ls -1t db-* 2>/dev/null | tail -n +"$((DB_BACKUP_KEEP+1))" | xargs -r rm -f) || true
   run_hooks db_backup "$outfile"
-  return 0
 }
 
-# restore from backup file (tar or tar.zst)
+# restore from backup
 db_restore() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
     log_error "Backup file not found: $file"
     return 1
   fi
-  # extract to temp dir first
   local tmp
   tmp="$(mktemp -d)"
   if [[ "$file" =~ \.zst$ ]] && [[ -n "$ZSTD_BIN" ]]; then
@@ -526,7 +585,7 @@ db_restore() {
       return 1
     }
   fi
-  # Move extracted db into place (safe swap)
+  # safe swap
   local swp="${NPKG_DB_DIR}.old.$(timestamp)"
   if [[ -d "$NPKG_DB_DIR" ]]; then
     mv "$NPKG_DB_DIR" "$swp" || {
@@ -537,7 +596,6 @@ db_restore() {
   fi
   mv "$tmp/$(basename "$NPKG_DB_DIR")" "$NPKG_DB_DIR" || {
     log_error "Failed to move restored DB into place"
-    # try to restore old
     [[ -d "$swp" ]] && mv "$swp" "$NPKG_DB_DIR" || true
     rm -rf "$tmp"
     return 1
@@ -545,146 +603,123 @@ db_restore() {
   rm -rf "$swp" || true
   log_info "DB restored from $file"
   run_hooks db_restore "$file"
-  return 0
+  # rebuild index to ensure consistency
+  db_reindex
 }
 
-# verify: check files exist and optionally checksums
+# verify manifest files exist and optional checksums
 db_verify() {
   local target="$1"
   local manifests=()
-  while IFS= read -r m; do
-    [[ -n "$m" ]] || continue
-    manifests+=("$m")
-  done < <(_find_manifests "$target")
-
-  if [[ "${#manifests[@]}" -eq 0 ]]; then
-    log_error "No manifest found for '$target'"
-    return 2
-  fi
-
-  for m in "${manifests[@]}"; do
-    log_info "Verifying manifest: $(basename "$m")"
-    # Determine file item type
-    if "$JQ_BIN" -e '.files[0] | type == "object"' "$m" >/dev/null 2>&1; then
-      # objects with path & optional sha256
-      local idx=0
-      local count
-      count="$("$JQ_BIN" '.files | length' "$m")"
-      while [[ $idx -lt $count ]]; do
-        local path="$("$JQ_BIN" -r ".files[$idx].path" "$m")"
-        local hs
-        hs="$("$JQ_BIN" -r ".files[$idx].sha256 // empty" "$m")"
-        if [[ -z "$path" ]]; then
-          log_warn "Empty path entry in manifest $m at index $idx"
-          idx=$((idx+1)); continue
-        fi
-        if [[ ! -e "$path" ]]; then
-          log_warn "Missing file: $path"
-        else
-          log_info "Found: $path"
-          if [[ -n "$hs" && -n "$SHA256SUM_BIN" ]]; then
-            local got
-            got="$(sha256sum "$path" | awk '{print $1}')"
-            if [[ "$got" != "$hs" ]]; then
-              log_warn "sha256 mismatch for $path"
-            else
-              log_info "sha256 OK: $path"
+  # find matching via index
+  local hits
+  hits="$("$JQ_BIN" -c --arg n "$target" 'map(select(.name == $n or (.name + "-" + .version) == $n))' "$INDEX_FILE" 2>/dev/null || true)"
+  if [[ -n "$hits" && "$hits" != "[]" ]]; then
+    # iterate hits
+    echo "$hits" | while IFS= read -r item; do
+      local mf="$NPKG_DB_DIR/$(echo "$item" | "$JQ_BIN" -r '.manifest')"
+      "$JQ_BIN" -e '.files[0] | type == "object"' "$mf" >/dev/null 2>&1 && {
+        local cnt="$("$JQ_BIN" '.files | length' "$mf")"
+        for ((i=0;i<cnt;i++)); do
+          local p hs
+          p="$("$JQ_BIN" -r ".files[$i].path" "$mf")"
+          hs="$("$JQ_BIN" -r ".files[$i].sha256 // empty" "$mf")"
+          if [[ ! -e "$p" ]]; then
+            log_warn "Missing: $p"
+          else
+            log_info "Found: $p"
+            if [[ -n "$hs" && -n "$SHA256SUM_BIN" ]]; then
+              local got
+              got="$(sha256sum "$p" | awk '{print $1}')"
+              if [[ "$got" != "$hs" ]]; then
+                log_warn "sha256 mismatch: $p"
+              else
+                log_info "sha256 OK: $p"
+              fi
             fi
           fi
-        fi
-        idx=$((idx+1))
-      done
-    else
-      # files array of strings
-      local f
-      while IFS= read -r f; do
-        if [[ -z "$f" ]]; then continue; fi
-        if [[ ! -e "$f" ]]; then
-          log_warn "Missing file: $f"
-        else
-          log_info "Found: $f"
-        fi
-      done < <("$JQ_BIN" -r '.files[]' "$m")
-    fi
-  done
-}
-
-# orphans: packages without reverse deps and optionally not explicitly installed
-db_orphans() {
-  local manifests=()
-  local f
+        done
+      } || {
+        # simple list
+        "$JQ_BIN" -r '.files[]' "$mf" | while IFS= read -r p; do
+          if [[ ! -e "$p" ]]; then
+            log_warn "Missing: $p"
+          else
+            log_info "Found: $p"
+          fi
+        done
+      }
+    done
+    return 0
+  fi
+  # fallback to scanning manifests
   for f in "$NPKG_DB_DIR"/*.json; do
     [[ -f "$f" ]] || continue
-    manifests+=("$f")
-  done
-
-  for f in "${manifests[@]}"; do
-    local name
-    name="$("$JQ_BIN" -r '.name' "$f")"
-    # count revdeps
-    local deps_count
-    deps_count="$(db_revdeps "$name" | wc -l || true)"
-    if [[ -z "$deps_count" || "$deps_count" -eq 0 ]]; then
-      # skip if package has runtime deps (meaning it depends on others)??? but orphans defined as nobody depends on them
-      echo "$(jq -r '.name + "-" + .version' "$f")"
+    if "$JQ_BIN" -e --arg n "$target" '.name == $n or (.name + "-" + .version) == $n' "$f" >/dev/null 2>&1; then
+      db_verify "$f" || true
     fi
   done
 }
 
-# search: search by name or description
+# orphans: list packages with zero revdeps
+db_orphans() {
+  local total
+  total="$("$JQ_BIN" 'length' "$INDEX_FILE")"
+  if [[ "$total" -eq 0 ]]; then
+    echo ""
+    return 0
+  fi
+  local names
+  names="$("$JQ_BIN" -r '.[].name' "$INDEX_FILE" | sort -u)"
+  for n in $names; do
+    local rdeps
+    rdeps="$(db_revdeps "$n" | wc -l || true)"
+    if [[ -z "$rdeps" || "$rdeps" -eq 0 ]]; then
+      # print latest version if multiple
+      "$JQ_BIN" -r --arg n "$n" 'map(select(.name==$n)) | max_by(.version) | .name + "-" + .version' "$INDEX_FILE"
+    fi
+  done
+}
+
+# search by name/description/origin
 db_search() {
   local term="$1"
-  local f
-  for f in "$NPKG_DB_DIR"/*.json; do
-    [[ -f "$f" ]] || continue
-    if "$JQ_BIN" -e --arg t "$term" '(.name | contains($t)) or (.description // "" | contains($t)) or (.origin // "" | contains($t))' "$f" >/dev/null 2>&1; then
-      echo "$(jq -r '.name + "-" + .version + "  (" + (.origin // "") + ") "' "$f")"
-    fi
-  done
+  "$JQ_BIN" -r --arg t "$term" '.[] | select( (.name|contains($t)) or (.origin|contains($t)) ) | .name + "-" + .version + " (" + .origin + ")"' "$INDEX_FILE"
 }
 
-# size: estimate installed size by summing sizes of files
+# size: sum file sizes for manifest(s)
 db_size() {
   local target="$1"
-  local manifests=()
-  while IFS= read -r m; do
-    [[ -n "$m" ]] || continue
-    manifests+=("$m")
-  done < <(_find_manifests "$target")
-
-  if [[ "${#manifests[@]}" -eq 0 ]]; then
-    log_error "No manifest found for '$target'"
-    return 2
-  fi
-
   local total=0
-  for m in "${manifests[@]}"; do
-    # iterate files
-    if "$JQ_BIN" -e '.files[0] | type == "object"' "$m" >/dev/null 2>&1; then
-      local idx=0
-      local cnt="$("$JQ_BIN" '.files | length' "$m")"
-      while [[ $idx -lt $cnt ]]; do
-        local p="$("$JQ_BIN" -r ".files[$idx].path" "$m")"
-        if [[ -f "$p" ]]; then
-          local s
-          s=$(stat -c%s "$p" 2>/dev/null || echo 0)
-          total=$((total + s))
-        fi
-        idx=$((idx+1))
-      done
-    else
-      while IFS= read -r p; do
-        [[ -z "$p" ]] && continue
-        if [[ -f "$p" ]]; then
-          local s
-          s=$(stat -c%s "$p" 2>/dev/null || echo 0)
-          total=$((total + s))
-        fi
-      done < <("$JQ_BIN" -r '.files[]' "$m")
-    fi
-  done
-
-  # print human-friendly
+  # find relevant manifests via index
+  local hits
+  hits="$("$JQ_BIN" -c --arg n "$target" 'map(select(.name == $n or (.name + "-" + .version) == $n))' "$INDEX_FILE" 2>/dev/null || true)"
+  if [[ -n "$hits" && "$hits" != "[]" ]]; then
+    echo "$hits" | while IFS= read -r item; do
+      local mf="$NPKG_DB_DIR/$(echo "$item" | "$JQ_BIN" -r '.manifest')"
+      if [[ ! -f "$mf" ]]; then continue; fi
+      # accumulate
+      if "$JQ_BIN" -e '.files[0] | type == "object"' "$mf" >/dev/null 2>&1; then
+        local cnt
+        cnt="$("$JQ_BIN" '.files | length' "$mf")"
+        for ((i=0;i<cnt;i++)); do
+          local p
+          p="$("$JQ_BIN" -r ".files[$i].path" "$mf")"
+          if [[ -f "$p" ]]; then
+            total=$((total + $(stat -c%s "$p" 2>/dev/null || echo 0)))
+          fi
+        done
+      else
+        while IFS= read -r p; do
+          [[ -z "$p" ]] && continue
+          if [[ -f "$p" ]]; then
+            total=$((total + $(stat -c%s "$p" 2>/dev/null || echo 0)))
+          fi
+        done < <("$JQ_BIN" -r '.files[]' "$mf")
+      fi
+    done
+  fi
+  # print human readable
   if [[ "$total" -lt 1024 ]]; then
     echo "${total} bytes"
   elif [[ "$total" -lt $((1024*1024)) ]]; then
@@ -700,8 +735,9 @@ db_size() {
 # CLI dispatch
 ###########################
 show_help() {
-  sed -n '1,200p' "$0" | sed -n '1,120p'
   cat <<'EOF'
+db.sh - package metadata DB for newpkg (with index)
+Usage: db.sh <command> [args...]
 
 Commands:
   init
@@ -713,6 +749,7 @@ Commands:
   provides <file-path>
   backup
   restore <backup-file>
+  reindex
   verify <pkg|pkg-version>
   orphans
   search <term>
@@ -729,59 +766,34 @@ main() {
 
   local cmd="$1"; shift
 
-  # ensure base dirs exist for most commands
   case "$cmd" in
     init)
-      db_init
-      return $?
-      ;;
-    add|backup|restore|list|query|remove|revdeps|provides|verify|orphans|search|size)
-      db_init
+      db_init; return $?
       ;;
   esac
 
+  # ensure db exists for other commands
+  db_init
+
   case "$cmd" in
-    init) db_init ;;
     add) db_add "$@" ;;
     remove) db_remove "$@" ;;
     query) db_query "$@" ;;
     list) db_list "$@" ;;
-    revdeps) 
-      if [[ $# -lt 1 ]]; then echo "revdeps <pkg>"; return 1; fi
-      db_revdeps "$1"
-      ;;
-    provides)
-      if [[ $# -lt 1 ]]; then echo "provides <file>"; return 1; fi
-      db_provides "$1"
-      ;;
+    revdeps) db_revdeps "$@" ;;
+    provides) db_provides "$@" ;;
     backup) db_backup ;;
-    restore)
-      if [[ $# -lt 1 ]]; then echo "restore <file>"; return 1; fi
-      db_restore "$1"
-      ;;
-    verify)
-      if [[ $# -lt 1 ]]; then echo "verify <pkg>"; return 1; fi
-      db_verify "$1"
-      ;;
+    restore) db_restore "$@" ;;
+    reindex) db_reindex ;;
+    verify) db_verify "$@" ;;
     orphans) db_orphans ;;
-    search)
-      if [[ $# -lt 1 ]]; then echo "search <term>"; return 1; fi
-      db_search "$1"
-      ;;
-    size)
-      if [[ $# -lt 1 ]]; then echo "size <pkg>"; return 1; fi
-      db_size "$1"
-      ;;
+    search) db_search "$@" ;;
+    size) db_size "$@" ;;
     help|-h|--help) show_help ;;
-    *)
-      echo "Unknown command: $cmd"
-      show_help
-      return 1
-      ;;
+    *) log_error "Unknown command: $cmd"; show_help; return 1 ;;
   esac
 }
 
-# allow script to be sourced for function use
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi
