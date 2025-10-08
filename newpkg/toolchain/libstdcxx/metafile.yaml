@@ -1,0 +1,121 @@
+# ==============================================================================
+# metafile.yaml — Libstdc++ (parte do GCC) para Newpkg / LFS
+# Local sugerido: /usr/ports/system/libstdcxx/metafile.yaml
+# Baseado no LFS 12.4 (Sec. 5.6) “Libstdc++ from GCC-15.2.0” 1
+# ==============================================================================
+
+name: libstdcxx
+version: 15.2.0
+release: 1
+epoch: 0
+category: gcc
+summary: "GNU C++ Standard Library (libstdc++)"
+description: |
+  A biblioteca padrão C++ que acompanha o GCC. No processo inicial do LFS,
+  construímos libstdc++ apenas após termos glibc, porque depende de headers de C.
+  Este pacote extrai a parte libstdc++ do tarball do GCC e compila apenas essa
+  subparte com as configurações apropriadas.
+
+# Estágio de construção — normalmente após glibc já estar instalado
+stage: normal
+
+# Fontes
+# Note: libstdc++ faz parte do tarball do GCC; não é baixado separadamente
+source:
+  - https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz
+  - https://ftpmirror.gnu.org/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz
+
+checksums:
+  sha256: 41860f9040e19db264ce4fbd5d2e2c0dffe4e6a1194d321fd2a87f27b3f7b31d
+
+build_dir: gcc-15.2.0
+
+# Ambiente (espera-se que glibc já esteja em /mnt/lfs)
+environment:
+  LFS: "/mnt/lfs"
+  LFS_TGT: "$(uname -m)-lfs-linux-gnu"
+  PATH: "/mnt/lfs/tools/bin:/usr/bin:/bin"
+  MAKEFLAGS: "-j$(nproc)"
+  SHELL: "/bin/bash"
+  CXXFLAGS: ""
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+
+# Dependências
+depends:
+  build:
+    - gcc
+    - glibc
+  runtime:
+    - glibc
+
+bootstrap_tools:
+  - gcc
+  - make
+  - binutils
+
+# Comandos de build (extraindo e construindo libstdc++-v3)
+build:
+  # entra no diretório do GCC e prepara subdiretório libstdc++
+  - mkdir -v build-libstdcxx
+  - cd build-libstdcxx
+  - ../libstdc++-v3/configure \
+        --host=$LFS_TGT \
+        --build=$(../config.guess) \
+        --prefix=/usr \
+        --disable-multilib \
+        --disable-nls \
+        --disable-libstdcxx-pch \
+        --with-gxx-include-dir=/tools/$LFS_TGT/include/c++/$version
+
+  - make
+
+# Instalação
+install:
+  - cd build-libstdcxx
+  - make DESTDIR=$LFS install
+  - rm -v $LFS/usr/lib/lib{stdc++{,fs,exp},supc++}.la || true
+
+# Hooks opcionais
+hooks:
+  pre_build: scripts/pre-build.sh
+  post_install: scripts/post-install.sh
+
+# Limpeza extra
+cleanup:
+  - rm -rf $PWD/build-libstdcxx
+
+# Políticas de build específicas
+build_policy:
+  continue_on_error: false
+  require_chroot: true
+  run_as_user: lfs
+  sandbox: true
+  isolated_env: true
+
+security:
+  drop_privileges: true
+  forbid_root_build: true
+  sandbox: true
+  restricted_network: true
+
+# Empacotamento
+package:
+  format: tar.zst
+  compression_level: 19
+  output_dir: /mnt/lfs/packages
+  include_docs: false
+  include_manpages: false
+  include_locales: false
+
+metadata:
+  maintainer: "Fernando Canata <fernando@example.org>"
+  license: "GPL-3.0-or-later"
+  homepage: https://gcc.gnu.org/libstdc++/
+  section: "GCC"
+
+notes: |
+  Libstdc++ deve ser compilado *depois* de glibc estar instalados, porque
+  depende dos headers C e de suporte básico de runtime.  
+  O diretório include de C++ deve apontar para /tools/$LFS_TGT/include/c++/$version
+  conforme descrito no livro LFS 12.4, sec. 5.6 2.
