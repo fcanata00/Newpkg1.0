@@ -1,0 +1,160 @@
+# ==============================================================================
+# newpkg_lfs.yaml — Configuração otimizada para construir o Linux From Scratch
+# e Beyond Linux From Scratch (BLFS)
+# ==============================================================================
+# Este perfil é ideal para uso em ambientes de construção LFS/BLFS.
+# Ele ajusta o comportamento do Newpkg para estabilidade e isolamento total.
+# ==============================================================================
+
+# Número de jobs paralelos de compilação
+# (ajuste de acordo com o número de núcleos da CPU)
+parallel_jobs: 2
+
+# Estágio padrão de construção — "pass1" ou "pass2"
+default_stage: pass1
+
+# Diretórios principais
+paths:
+  repo_dir: /usr/ports
+  source_cache: /mnt/lfs/sources
+  package_cache: /mnt/lfs/packages
+  build_root: /mnt/lfs/build
+  lfs_root: /mnt/lfs
+  log_dir: /mnt/lfs/logs
+  db_dir: /mnt/lfs/var/lib/newpkg/db
+  state_dir: /mnt/lfs/var/lib/newpkg/state
+
+# Hooks globais (pode criar scripts nesses diretórios)
+hooks:
+  pre_build: /etc/newpkg/hooks/core/pre-build/
+  post_build: /etc/newpkg/hooks/core/post-build/
+  pre_install: /etc/newpkg/hooks/core/pre-install/
+  post_install: /etc/newpkg/hooks/core/post-install/
+
+# Configuração do ambiente de chroot
+chroot:
+  enabled: true
+  safe_mount: true
+  persistent: true
+  user: lfs
+  home: /home/lfs
+  shell: /bin/bash
+  copy_resolv_conf: true
+  clean_between_builds: true
+  clean_on_exit: true
+
+# Política de build e recuperação
+build:
+  continue_on_error: false    # Para imediatamente ao primeiro erro
+  auto_resume: true           # Retoma automaticamente builds interrompidos
+  clean_workdir: true         # Limpa diretórios temporários entre pacotes
+  compress_format: .tar.zst   # Formato padrão de empacotamento
+  fakeroot: true
+  patch_support: true
+  hooks_enabled: true
+  environment_isolation: true # Usa env minimalista durante builds
+
+# Ambiente de compilação
+environment:
+  LANG: "en_US.UTF-8"
+  LC_ALL: "POSIX"
+  LFS: "/mnt/lfs"
+  PATH: "/usr/bin:/bin"
+  MAKEFLAGS: "-j2"
+  CONFIG_SITE: "/usr/share/config.site"
+  SHELL: "/bin/bash"
+
+# Configuração de logs
+logging:
+  color_output: true
+  timestamps: true
+  keep_history: true
+  summary_log: true
+  log_dir: /mnt/lfs/logs
+  detailed_logs: true
+  per_package_logs: true
+
+# Auditoria e recuperação
+audit:
+  auto_selfcheck: true        # Verifica ambiente antes de cada build
+  auto_recover: true          # Recupera pacotes corrompidos do cache
+  fix_permissions: true
+  verify_mounts: true
+  verify_lfs_vars: true
+  check_orphans: true
+  fix_from_cache: true
+  auto_clean_logs: true
+  keep_days: 15
+
+# Controle de repositório (sync)
+repo:
+  git_url: https://github.com/usuario/ports-lfs.git
+  branch: lfs
+  auto_commit: false
+  parallel_sync: true
+  quiet_mode: false
+  dry_run: false
+
+# Dependências
+deps:
+  solver: networkx
+  interactive: false          # Sem prompts interativos (ideal para automação)
+  export_json: true
+  cache_graph: true
+  fail_on_unresolved: true
+
+# Aparência e interface
+ui:
+  theme: "minimal"
+  color_scheme:
+    success: green
+    warning: yellow
+    error: red
+    info: blue
+  show_menu_tips: false
+  progress_bar: false
+
+# Segurança e isolamento
+security:
+  sandbox: true
+  drop_privileges: true
+  forbid_root_build: true
+  restricted_network: true
+  verify_checksums: true
+  check_signatures: false
+  integrity_check: true
+
+# Limpeza automática
+cleanup:
+  clean_temp_after_build: true
+  clean_failed_packages: true
+  clean_cache_days: 30
+  clean_mounts_on_exit: true
+
+# Políticas do doctor/audit integrado
+doctor:
+  check_symlinks: true
+  check_permissions: true
+  check_orphans: true
+  verify_installed_files: true
+  fix_broken_links: true
+  fix_from_cache: true
+  log_path: /mnt/lfs/logs/newpkg_audit.log
+
+# Ajustes adicionais para stages LFS
+stages:
+  pass1:
+    description: "Toolchain inicial (binutils, gcc, glibc)"
+    install_root: /mnt/lfs
+    user: lfs
+    parallel_jobs: 2
+  pass2:
+    description: "Toolchain final"
+    install_root: /mnt/lfs
+    user: lfs
+    parallel_jobs: 4
+  normal:
+    description: "Pacotes finais do sistema"
+    install_root: /
+    user: root
+    parallel_jobs: 4
