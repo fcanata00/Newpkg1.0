@@ -1,0 +1,103 @@
+# ==============================================================================
+# metafile.yaml — Linux Headers (para LFS)  
+# Local: /usr/ports/toolchain/linux-headers/metafile.yaml  
+# Baseado no capítulo “Linux Headers” do LFS stable  
+# ==============================================================================
+
+name: linux-headers
+version: 6.9.1              # Exemplo de versão — ajuste conforme seu tarball
+release: 1
+epoch: 0
+category: kernel
+summary: "Linux Kernel Headers para LFS (Pass 1)"
+description: |
+  Este pacote instala os cabeçalhos do kernel Linux no ambiente LFS
+  antes da construção de glibc. Esses headers são “limpos” (sem arquivos extras)
+  e implantados em /mnt/lfs/usr/include.
+
+stage: pass1
+
+# Fontes
+source:
+  - https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.9.1.tar.xz
+  - https://mirrors.edge.kernel.org/pub/linux/kernel/v6.x/linux-6.9.1.tar.xz
+
+checksums:
+  sha256: 5c423f757cea90c0c0d5857a1f5edecf66da68c3e2344ac191f85632d436a3a7
+
+build_dir: linux-6.9.1
+
+# Ambiente mínimo
+environment:
+  LFS: "/mnt/lfs"
+  PATH: "/usr/bin:/bin"
+  SHELL: "/bin/bash"
+  MAKEFLAGS: "-j$(nproc)"
+  LANG: "C.UTF-8"
+  LC_ALL: "POSIX"
+
+# Dependências
+depends:
+  build:
+    - gcc
+    - make
+  runtime: []
+
+bootstrap_tools:
+  - gcc
+  - make
+  - binutils
+
+# Comandos de build (seguindo o livro)
+# No LFS, o livro recomenda que apenas 'make headers_install' seja utilizado
+build:
+  - make mrproper   # limpa árvore
+  - make headers_check
+  - make INSTALL_HDR_PATH=/mnt/lfs/usr headers_install
+
+# Instalação (parte da build) — o `make INSTALL_HDR_PATH` já copia
+install:
+  # nothing extra além do headers_install
+
+# Hooks opcionais
+hooks:
+  pre_build: scripts/pre-build.sh
+  post_install: scripts/post-install.sh
+
+# Limpeza
+cleanup:
+  - rm -rf $PWD/include
+  - rm -rf $PWD/arch/$(uname -m)/include/generated
+
+# Políticas
+build_policy:
+  continue_on_error: false
+  require_chroot: true
+  run_as_user: lfs
+  sandbox: true
+
+security:
+  drop_privileges: true
+  forbid_root_build: true
+  sandbox: true
+  restricted_network: true
+
+# Empacotamento
+package:
+  format: tar.zst
+  compression_level: 19
+  output_dir: /mnt/lfs/packages
+  include_docs: false
+  include_manpages: false
+  include_locales: false
+
+metadata:
+  maintainer: "Fernando Canata <fernando@example.org>"
+  license: "GPL-2.0"
+  homepage: "https://www.kernel.org"
+  section: "Kernel"
+
+notes: |
+  Este pacote instala apenas os cabeçalhos do kernel (subconjunto mínimo)
+  requeridos para compilação de glibc no LFS.  
+  O diretório final esperado é /mnt/lfs/usr/include/linux e /mnt/lfs/usr/include/asm.
