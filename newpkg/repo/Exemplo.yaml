@@ -1,0 +1,121 @@
+# meta.yaml - exemplo completo
+name: mypkg
+version: 1.2.3
+arch: x86_64
+origin: "category/mypkg"      # caminho relativo em /usr/ports (usado por sync/db)
+stage: pass1                  # pass1 | pass2 | normal
+description: "Descrição curta"
+maintainer: "you <you@example.org>"
+license: MIT
+
+# --- sources: múltiplos downloads permitidos (ordem de fallback) ---
+sources:
+  - url: "https://example.org/mypkg-1.2.3.tar.xz"
+    sha256: "abcdef1234..."
+    signature: "https://example.org/mypkg-1.2.3.tar.xz.sig"
+    type: "tar.xz"
+  - url: "git+https://github.com/author/mypkg.git@v1.2.3"
+    type: "git"
+  - url: "rsync://mirror.example.org/mypkg/1.2.3/mypkg.tar.gz"
+    type: "tar.gz"
+
+# --- opcional: nome da pasta build e criação automática ---
+build:
+  build_dir_name: "mypkg-build"     # nome da pasta onde extrair e compilar (se omitido: autodetect)
+  create_build_dir: true            # se true, core.sh cria automaticamente
+  create_config_file: true          # se true, gerar um arquivo de config (veja abaixo)
+  config_template: |
+    # arquivo de configuração gerado automaticamente
+    option_a = true
+    option_b = "/usr/local"
+  buildsystem: autotools            # autotools|cmake|meson|python|make|custom
+  configure_flags: ["--prefix=/usr", "--enable-feature-x"]
+  make_jobs: null                   # null -> usar default/jobs do sistema
+
+# --- environment: exportado para o ambiente de build (aplicável em chroot) ---
+environment:
+  CFLAGS: "-O2 -g"
+  LDFLAGS: "-Wl,-O1"
+  PATH: "/usr/bin:/bin:/usr/local/bin"
+  EXTRA_ENV:
+    - "SOMEVAR=value"
+    - "OTHER=val"
+
+# --- patches: lista aplicada (pode ser patch file relativo ao port dir) ---
+patches:
+  - "patches/fix-linker.patch"
+  - "patches/0002-enable-compat.patch"
+
+# --- hooks (por estágio) ---
+hooks:
+  pre_fetch:
+    - "hooks/pre_fetch/10-prepare-mirror.sh"
+  post_extract:
+    - "hooks/post_extract/10-fix-perms.sh"
+  pre_build:
+    - "hooks/pre_build/05-generate-config.sh"
+  post_install:
+    - "hooks/post_install/10-strip-binaries.sh"
+  pre_remove:
+    - "hooks/pre_remove/10-save-config.sh"
+  post_remove:
+    - "hooks/post_remove/10-cleanup-logs.sh"
+
+# --- dependencies ---
+depends:
+  build:
+    - "pkg-config"
+    - "libfoo>=1.0"
+  run:
+    - "libbar>=2.0"
+  optional:
+    - "docviewer"
+
+# --- provides / conflicts / replaces ---
+provides:
+  - "mypkg"
+conflicts:
+  - "otherpkg < 2.0"
+replaces: []
+
+# --- metadata de empacotamento ---
+packaging:
+  compress: true                   # true|false (se false -> não comprimir)
+  compression: "zstd"              # zstd|gzip|xz
+  compression_args: "-19"          # argumentos para compressor
+  manifest_format: "newpkg-manifest-v1"
+
+# --- policies específicas por stage (overrides) ---
+stage_overrides:
+  pass1:
+    install_prefix: "/mnt/lfs"      # onde será instalado durante pass1
+    do_not_compress: true
+    run_as_user: "lfs"              # usuário para testes (o core.sh deve rodar testes sob este user dentro de chroot)
+  pass2:
+    install_prefix: "/mnt/lfs"
+    do_not_compress: true
+    run_as_user: "lfs"
+  normal:
+    install_prefix: "/"             # instalação final no sistema
+    do_not_compress: false
+    run_as_user: "root"
+
+# --- build/test commands customizados (opcional) ---
+commands:
+  prepare: |
+    autoreconf -vfi
+  build: |
+    ./configure --prefix=/usr ${CONFIGURE_FLAGS}
+    make -j$(nproc)
+  install: |
+    make DESTDIR=${DESTDIR} install
+
+# --- optional: user-facing flags ---
+flags:
+  interactive: false
+  skip_tests: false
+
+# --- optional: extra files to include in the package root (manifests, license) ---
+extra_files:
+  - "LICENSE"
+  - "README.md"
