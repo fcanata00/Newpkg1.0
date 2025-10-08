@@ -1,0 +1,255 @@
+# bash/zsh completion for newpkg
+# Install: sudo cp this file to /usr/share/bash-completion/completions/newpkg
+# or to ~/.bash_completion.d/newpkg for a single-user install.
+#
+# Features:
+#  - completes subcommands and options
+#  - completes package names from /usr/ports (meta YAMLs or folder names)
+#  - completes installed packages via db.sh
+#  - completes stage names (pass1 pass2 normal final)
+#  - caches results in ~/.cache/newpkg/completion/*
+#
+# Works in Bash and Zsh (when zsh runs bashcompinit)
+#
+# Author: generated for your newpkg system
+
+_newpkg_cache_dir() {
+  : "${XDG_CACHE_HOME:=$HOME/.cache}"
+  echo "$XDG_CACHE_HOME/newpkg/completion"
+}
+
+_newpkg_ensure_cache() {
+  local d
+  d="$(_newpkg_cache_dir)"
+  mkdir -p "$d"
+}
+
+# refresh ports list (names only)
+_newpkg_refresh_ports_cache() {
+  local cachef
+  cachef="$(_newpkg_cache_dir)/ports.list"
+  : > "$cachef"
+  # prefer yq-based extraction if available
+  if command -v yq >/dev/null 2>&1; then
+    # find likely metafiles
+    find /usr/ports -maxdepth 4 -type f \( -iname 'meta.yaml' -o -iname 'meta.yml' -o -iname 'package.yaml' -o -iname '*.yaml' -o -iname '*.yml' \) -print0 2>/dev/null |
+      xargs -0 -n1 -P4 bash -c '
+        f="$0"
+        nm="$(yq e '\''.name // .package // .pkgname // ""'\'' "$f" 2>/dev/null || true)"
+        if [[ -z "$nm" || "$nm" == "null" ]]; then nm="$(basename "$(dirname "$f")")"; fi
+        if [[ -n "$nm" ]]; then printf "%s\n" "$nm"; fi
+      ' 2>/dev/null >> "$cachef"
+  else
+    # fallback: list directories under /usr/ports two levels deep
+    find /usr/ports -mindepth 2 -maxdepth 2 -type d -printf '%f\n' 2>/dev/null >> "$cachef"
+  fi
+  # uniq & sort
+  sort -u "$cachef" -o "$cachef"
+  chmod 0644 "$cachef" 2>/dev/null || true
+}
+
+# refresh installed packages cache (via db.sh)
+_newpkg_refresh_installed_cache() {
+  local cachef
+  cachef="$(_newpkg_cache_dir)/installed.list"
+  : > "$cachef"
+  if [[ -x /usr/share/newpkg/db.sh ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      /usr/share/newpkg/db.sh list --json 2>/dev/null | jq -r '.[].name' 2>/dev/null >> "$cachef" || true
+    else
+      /usr/share/newpkg/db.sh list 2>/dev/null | awk '{print $1}' >> "$cachef" || true
+    fi
+  else
+    # fallback: nothing
+    :
+  fi
+  sort -u "$cachef" -o "$cachef"
+  chmod 0644 "$cachef" 2>/dev/null || true
+}
+
+# master refresh (called on --sync or manually)
+_newpkg_refresh_all() {
+  _newpkg_ensure_cache
+  _newpkg_refresh_ports_cache &
+  _newpkg_refresh_installed_cache &
+  wait
+}
+
+# read caches into arrays (fast)
+_newpkg_read_ports() {
+  local cf="$(_newpkg_cache_dir)/ports.list"
+  if [[ ! -f "$cf" ]]; then _newpkg_refresh_ports_cache; fi
+  mapfile -t __newpkg_ports < "$cf" 2>/dev/null || __newpkg_ports=()
+}
+_newpkg_read_installed() {
+  local cf="$(_newpkg_cache_dir)/installed.list"
+  if [[ ! -f "$cf" ]]; then _newpkg_refresh_installed_cache; fi
+  mapfile -t __newpkg_installed < "$cf" 2>/dev/null || __newpkg_installed=()
+}
+
+# utility: complete from array
+_newpkg_comp_from_array() {
+  local cur="$1"; shift
+  local -n arr="$1"
+  local res=()
+  for v in "${arr[@]}"; do
+    [[ "$v" == "$cur"* ]] && res+=("$v")
+  done
+  if [[ ${#res[@]} -gt 0 ]]; then
+    COMPREPLY=( "${res[@]}" )
+  else
+    COMPREPLY=( $(compgen -W "${arr[*]}" -- "$cur") )
+  fi
+}
+
+# list of primary commands and options
+_newpkg_commands() {
+  cat <<'EOF'
+--install -i --remove -r --upgrade -u --sync -s --bootstrap -b --deps -d --core -c --audit -a --list -l --ports -p --search --query -q --revdep --depclean --init --menu --resume --audit-log --help --version --dry-run -n --quiet -q
+EOF
+}
+
+# stage completions
+_newpkg_stages() {
+  COMPREPLY=( pass1 pass2 normal final )
+}
+
+# primary completion dispatcher
+_newpkg() {
+  local cur prev words cword
+  _get_comp_words_by_ref || { cur="${COMP_WORDS[COMP_CWORD]}"; prev="${COMP_WORDS[COMP_CWORD-1]}"; words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD; }
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  # if user requested to refresh cache via --sync flag in progress, don't block
+  case "$prev" in
+    --install|-i)
+      _newpkg_read_ports
+      _newpkg_comp_from_array "$cur" __newpkg_ports
+      return 0
+      ;;
+    --remove|-r)
+      _newpkg_read_installed
+      _newpkg_comp_from_array "$cur" __newpkg_installed
+      return 0
+      ;;
+    --upgrade|-u)
+      _newpkg_read_installed
+      _newpkg_comp_from_array "$cur" __newpkg_installed
+      return 0
+      ;;
+    --bootstrap|-b)
+      _newpkg_stages
+      return 0
+      ;;
+    --query|-q)
+      _newpkg_read_ports
+      _newpkg_read_installed
+      # suggest installed first, then ports
+      local merged
+      merged="${__newpkg_installed[*]} ${__newpkg_ports[*]}"
+      COMPREPLY=( $(compgen -W "$merged" -- "$cur") )
+      return 0
+      ;;
+    --search)
+      # no completion for arbitrary search terms
+      return 0
+      ;;
+  esac
+
+  # complete main commands/options
+  if [[ ${COMP_CWORD} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$(_newpkg_commands)" -- "$cur") )
+    return 0
+  fi
+
+  # handle subcommands and long options contextually if second word is a command
+  local cmd="${COMP_WORDS[1]:-}"
+  case "$cmd" in
+    --install|-i)
+      _newpkg_read_ports
+      _newpkg_comp_from_array "$cur" __newpkg_ports
+      ;;
+    install)
+      _newpkg_read_ports
+      _newpkg_comp_from_array "$cur" __newpkg_ports
+      ;;
+    --remove|-r|remove)
+      _newpkg_read_installed
+      _newpkg_comp_from_array "$cur" __newpkg_installed
+      ;;
+    --upgrade|upgrade)
+      # accept --all or package names
+      if [[ "$cur" == --* ]]; then
+        COMPREPLY=( $(compgen -W "--all --force --dry-run --parallel --resume" -- "$cur") )
+      else
+        _newpkg_read_installed
+        _newpkg_comp_from_array "$cur" __newpkg_installed
+      fi
+      ;;
+    --sync|sync)
+      COMPREPLY=( $(compgen -W "--branch --quiet --dry-run" -- "$cur") )
+      ;;
+    --bootstrap|bootstrap)
+      COMPREPLY=( $(compgen -W "pass1 pass2 final normal --all --run --resume --clean-stage" -- "$cur") )
+      ;;
+    --deps|deps)
+      COMPREPLY=( $(compgen -W "resolve list tree rebuild sync" -- "$cur") )
+      ;;
+    --audit|audit)
+      COMPREPLY=( $(compgen -W "--full --security --cleanup --fix --dry-run --json --show-log" -- "$cur") )
+      ;;
+    --ports|ports)
+      # no further args
+      ;;
+    --query|--search|query|search)
+      # suggest names
+      _newpkg_read_ports
+      _newpkg_read_installed
+      local merged="${__newpkg_installed[*]} ${__newpkg_ports[*]}"
+      COMPREPLY=( $(compgen -W "$merged" -- "$cur") )
+      ;;
+    *)
+      # generic completion fallback
+      COMPREPLY=( $(compgen -W "$(_newpkg_commands)" -- "$cur") )
+      ;;
+  esac
+  return 0
+}
+
+# support for zsh: load bash completion functions if necessary
+_newpkg_zsh_compat() {
+  # if running under zsh, ensure bashcompinit is loaded
+  # then register the bash-style completion function
+  if [[ -n "${ZSH_VERSION:-}" ]]; then
+    autoload -Uz bashcompinit 2>/dev/null && bashcompinit
+    complete -F _newpkg newpkg 2>/dev/null || true
+    # also provide a zsh _newpkg wrapper that delegates to bash-style completion
+    if [[ ! -f "${fpath[1]:-}/_newpkg" ]]; then
+      :
+    fi
+  fi
+}
+
+# register for bash
+if [[ -n "${BASH_VERSION:-}" ]]; then
+  _newpkg_ensure_cache
+  # install completion function
+  complete -F _newpkg newpkg 2>/dev/null || true
+fi
+
+# zsh support
+_newpkg_zsh_compat
+
+# auto-refresh hook:
+# when user runs "newpkg --sync" we recommend calling:
+#   _newpkg_refresh_all
+# Note: we don't auto-refresh on every TAB to keep responsiveness.
+
+# Provide a simple command to refresh manually:
+_newpkg_refresh_cache_cmd() {
+  _newpkg_refresh_all && echo "newpkg completion cache refreshed"
+}
+
+# expose refresh helper for users: `complete -p newpkg` still works
+# EOF
