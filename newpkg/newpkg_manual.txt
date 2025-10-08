@@ -1,0 +1,1043 @@
+===========================================
+  NEWPKG - Manual do Sistema de Build LFS
+  Versão: 1.0
+  Autor: Fernando Canata
+  Data: Outubro de 2025
+===========================================
+
+============================================================
+1. INTRODUÇÃO GERAL
+============================================================
+
+O Newpkg é um sistema modular de construção e gerenciamento
+de pacotes inspirado no Linux From Scratch (LFS) e Beyond LFS
+(BLFS). Seu objetivo é automatizar a compilação, instalação e
+manutenção de um sistema Linux totalmente construído a partir
+do código-fonte, mantendo a flexibilidade, transparência e
+controle total do processo.
+
+Diferente dos gerenciadores binários convencionais, o Newpkg
+constrói os pacotes diretamente do código-fonte, respeitando
+todas as dependências, configurações e estágios de build
+(especialmente os utilizados em sistemas LFS e BLFS).
+
+Cada pacote é definido por um “metafile” localizado no diretório
+/usr/ports, contendo todas as instruções para baixar, compilar e
+instalar o programa. O Newpkg gerencia o ambiente de build,
+cache, logs e registros de forma centralizada.
+
+O sistema é modular e composto pelos seguintes módulos:
+
+  - core.sh ........... realiza todo o processo de build, patch,
+                        hooks, instalação, empacotamento e deploy.
+  - db.sh ............. gerencia a base de dados de pacotes
+                        instalados, versões e metadados.
+  - log.sh ............ fornece logging colorido e detalhado de
+                        todas as operações.
+  - deps.py ........... gerencia dependências e gráficos de build
+                        com suporte interativo e análise via networkx.
+  - revdep_depclean.sh  realiza reconstrução de dependências
+                        quebradas e limpeza de dependências órfãs.
+  - remove.sh ......... remove pacotes com hooks de pré e pós
+                        remoção e executa limpeza automática.
+  - upgrade.sh ........ atualiza pacotes com reconstrução e
+                        reinstalação de dependências.
+  - sync.sh ........... sincroniza o repositório /usr/ports com o
+                        repositório Git remoto, com paralelismo e
+                        controle de branch.
+  - bootstrap.sh ...... realiza o processo de bootstrap e construção
+                        da toolchain completa, incluindo chroot,
+                        montagem e configuração automática.
+  - audit.sh .......... analisa o sistema em busca de falhas de
+                        segurança, arquivos órfãos, links quebrados
+                        e sujeiras, corrigindo automaticamente.
+  - newpkg ............ o executável principal, interface de uso
+                        unificada e interativa, com menu textual,
+                        cores e autocompletar.
+
+O Newpkg é totalmente controlado por um único arquivo de
+configuração YAML (`/etc/newpkg.yaml`), permitindo ajustar
+diretórios, flags de compilação, paralelismo, comportamento
+de logs e políticas de empacotamento.
+
+============================================================
+2. ESTRUTURA DE DIRETÓRIOS DO NEWPKG
+============================================================
+
+A organização de diretórios segue um padrão consistente para
+facilitar manutenção, isolamento e reutilização de componentes:
+
+  /usr/share/newpkg/
+      ├── newpkg                → executável principal
+      ├── lib/                  → contém todos os módulos *.sh e *.py
+      ├── completions/          → autocompletar bash e zsh
+      ├── examples/             → exemplos de metafiles e YAML
+      └── docs/                 → documentação e manuais
+
+  /etc/newpkg.yaml              → arquivo de configuração global
+  /usr/ports/                   → repositório de pacotes/metafiles
+  /var/cache/newpkg/            → cache de fontes e tarballs
+  /var/log/newpkg/              → logs de build, erros e auditoria
+  /var/lib/newpkg/db/           → banco de dados de pacotes instalados
+  /build/newpkg/                → diretório temporário de build
+  /mnt/lfs/                     → ponto de montagem do sistema em bootstrap
+
+Durante o processo de build, o Newpkg cria diretórios temporários
+seguindo as convenções do LFS, incluindo montagem de /dev, /proc,
+e /sys, com desmontagem automática ao final.
+
+O diretório `/usr/ports` contém os metafiles de cada pacote.  
+Cada metafile inclui informações como:
+
+  - Nome do pacote e versão
+  - URLs de download (múltiplos mirrors)
+  - Tipo de estágio (pass1, pass2, normal)
+  - Patches a aplicar
+  - Hooks pré e pós build
+  - Configuração de ambiente
+  - Diretório de build personalizado
+  - Criação de arquivos de configuração necessários
+
+============================================================
+3. INSTALAÇÃO E CONFIGURAÇÃO INICIAL
+============================================================
+
+A instalação do Newpkg é feita através do script instalador
+oficial (`install_newpkg.sh`), que:
+
+  1. Verifica todas as dependências obrigatórias no host.
+  2. Cria a estrutura completa de diretórios em /usr/share/newpkg.
+  3. Copia o executável newpkg, módulos, arquivo de configuração
+     e autocompletar bash/zsh.
+  4. Cria links simbólicos para:
+        - /usr/bin/newpkg
+        - /etc/newpkg.yaml
+        - /usr/share/bash-completion/completions/newpkg
+        - /usr/share/zsh/site-functions/_newpkg
+  5. Define permissões adequadas (0755 para scripts e 0644 para configs).
+  6. Exibe um resumo do ambiente finalizado.
+
+Dependências obrigatórias no host:
+
+  - bash >= 5.1
+  - python3 >= 3.10
+  - yq, jq, xargs, fakeroot, tar, zstd
+  - git, curl, wget
+  - networkx (para deps.py)
+  - util-linux, coreutils, grep, sed, awk
+  - mount, chroot (pacote util-linux)
+  - fakeroot e sudo (para builds isolados)
+
+Após a instalação:
+
+  - Edite `/etc/newpkg.yaml` para ajustar diretórios, paralelismo e flags.
+  - Execute `newpkg --init` para criar diretórios de trabalho e cache.
+  - Execute `newpkg --sync` para clonar ou atualizar o repositório /usr/ports.
+  - Execute `newpkg --list` para listar os pacotes disponíveis.
+
+O sistema estará então pronto para construir pacotes.
+
+============================================================
+[Fim da Parte 1 - Seções 1 a 3]
+============================================================
+============================================================
+4. COMANDOS PRINCIPAIS E SINTAXE
+============================================================
+
+O executável `newpkg` é a interface principal do sistema.  
+Todos os módulos são invocados automaticamente a partir dele, 
+seguindo uma sintaxe uniforme e intuitiva.
+
+Sintaxe geral:
+    newpkg [opção] [pacote(s)]
+
+Exemplos:
+    newpkg -i vim
+    newpkg --remove vim
+    newpkg --upgrade vim nano
+    newpkg --bootstrap stage1
+    newpkg --audit full
+
+------------------------------------------------------------
+Comandos e abreviações
+------------------------------------------------------------
+
+  -i,  --install <pkg(s)>        Instala ou reconstrói pacotes.
+  -r,  --remove <pkg>            Remove um pacote e executa limpeza.
+  -u,  --upgrade [pkg(s)]        Atualiza pacotes (ou todos, se omitido).
+  -s,  --sync [branch]           Sincroniza /usr/ports com repositório git.
+  -l,  --list                    Lista todos os pacotes do repositório.
+  -li, --list-installed          Lista pacotes instalados localmente.
+  -I,  --info <pkg>              Mostra informações completas do pacote.
+  -d,  --deps <pkg>              Mostra dependências diretas e reversas.
+  -a,  --audit                   Executa varredura de integridade e segurança.
+  -b,  --bootstrap <stage>       Constrói o ambiente de bootstrap/toolchain.
+  -R,  --revdep                  Reconstrói dependências quebradas.
+  -c,  --clean                   Limpa cache e logs antigos.
+  -f,  --fix <pkg>               Reconstrói um pacote quebrado do cache.
+  -h,  --help                    Mostra ajuda resumida.
+  -m,  --menu                    Abre o menu textual interativo.
+
+------------------------------------------------------------
+Menu textual
+------------------------------------------------------------
+
+O comando `newpkg --menu` abre um menu simples e colorido no terminal
+com opções numeradas:
+
+  [1] Instalar pacotes
+  [2] Atualizar pacotes
+  [3] Remover pacotes
+  [4] Sincronizar repositório
+  [5] Gerenciar dependências
+  [6] Auditoria do sistema
+  [7] Bootstrap/Toolchain
+  [8] Configuração
+  [9] Sair
+
+O menu utiliza apenas utilitários básicos (printf/read) e é totalmente
+compatível com terminais TTY.  
+
+------------------------------------------------------------
+Opções globais
+------------------------------------------------------------
+
+  --resume <pkg>       Retoma a compilação a partir do pacote que falhou.
+  --dry-run            Simula a operação sem executar.
+  --quiet              Executa com saída mínima.
+  --color [auto|on|off]Força ou desativa cores.
+  --auto-commit        Faz commits automáticos após operações de build.
+  --branch <nome>      Define branch Git temporário em sync.
+  --parallel <N>       Força número de tarefas paralelas.
+
+============================================================
+5. SISTEMA DE CONFIGURAÇÃO (newpkg.yaml)
+============================================================
+
+O arquivo `/etc/newpkg.yaml` define todos os parâmetros do sistema.
+A configuração é lida por todos os módulos, garantindo consistência.
+
+Exemplo de configuração:
+Principais chaves:
+
+  - `paths` ............. Define os diretórios base usados pelos módulos.
+  - `build` ............. Controla comportamento do core.sh (paralelismo,
+                          chroot, limpeza, cores, retomada).
+  - `git` ............... Configurações do sync.sh.
+  - `audit` ............. Opções para varredura automática do sistema.
+  - `deps` .............. Modo de operação do deps.py (interativo, solver, etc.).
+
+O arquivo é processado com `yq` e deve manter a indentação YAML válida.
+
+============================================================
+6. FUNCIONAMENTO DOS MÓDULOS INTERNOS
+============================================================
+
+Cada módulo do Newpkg é independente, mas todos compartilham
+um mesmo ambiente e leitura centralizada do arquivo YAML.  
+Todos ficam em `/usr/share/newpkg/lib/` e são carregados pelo
+executável principal via `source` (para .sh) ou `python3` (para .py).
+
+------------------------------------------------------------
+6.1 core.sh
+------------------------------------------------------------
+Responsável pelo ciclo completo de build:
+  - Baixar fontes (múltiplos formatos e URLs).
+  - Verificar cache e reutilizar se possível.
+  - Descompactar fontes para diretório de trabalho.
+  - Aplicar patches e executar hooks.
+  - Construir o pacote com make/configure/meson/etc.
+  - Instalar em destdir usando fakeroot.
+  - Empacotar em .tar.zst.
+  - Instalar em / (ou /mnt/lfs em estágios pass1/pass2).
+  - Registrar logs e metadados no db.sh.
+  - Operar em chroot seguro, com montagem e desmontagem automáticas.
+
+------------------------------------------------------------
+6.2 db.sh
+------------------------------------------------------------
+Mantém um banco de dados simples em formato texto (ou JSON)
+com nome, versão, data, dependências e checksums dos pacotes
+instalados.  
+Também permite:
+  - Registrar e remover pacotes.
+  - Consultar versões e histórico.
+  - Gerar relatórios para auditoria e upgrade.
+
+------------------------------------------------------------
+6.3 log.sh
+------------------------------------------------------------
+Fornece funções para registrar eventos coloridos:
+  - info(), warn(), error(), success()
+  - log_to_file() salva tudo em /var/log/newpkg
+  - perf_timer() mede tempos de build e instala.
+
+Cores configuráveis via `newpkg.yaml`.  
+
+------------------------------------------------------------
+6.4 deps.py
+------------------------------------------------------------
+Gerencia dependências com `networkx`, oferecendo:
+  - Resolução interativa ou automática.
+  - Análise de grafos de dependências.
+  - Detecção de ciclos e dependências órfãs.
+  - Exportação de grafos para visualização.
+  - Suporte a “resume” e reconstrução seletiva.
+
+------------------------------------------------------------
+6.5 revdep_depclean.sh
+------------------------------------------------------------
+Reconstrói pacotes quebrados e remove dependências órfãs.  
+Opera de forma automatizada após remoções ou upgrades,
+com suporte a --auto-commit e integração ao deps.py.
+
+------------------------------------------------------------
+6.6 sync.sh
+------------------------------------------------------------
+Sincroniza o diretório /usr/ports com o repositório Git:
+  - Suporte a paralelismo via xargs -P.
+  - Branch override (--branch <nome>).
+  - Auto-commit opcional.
+  - Modo quiet/dry-run.
+  - Atualiza automaticamente os metafiles.
+
+------------------------------------------------------------
+6.7 remove.sh
+------------------------------------------------------------
+Remove pacotes com limpeza total:
+  - Executa hooks pré e pós remoção.
+  - Remove arquivos registrados no db.sh.
+  - Chama revdep_depclean.sh e deps.py para revalidação.
+  - Atualiza logs e banco de dados.
+
+------------------------------------------------------------
+6.8 upgrade.sh
+------------------------------------------------------------
+Realiza upgrades automáticos:
+  - Verifica dependências afetadas.
+  - Reconstrói pacotes quebrados.
+  - Suporte a rollback (reinstala tarball anterior).
+  - Pode continuar após falha (--resume).
+  - Comandos seguros e integrados ao db.sh e core.sh.
+
+------------------------------------------------------------
+6.9 bootstrap.sh
+------------------------------------------------------------
+Implementa o processo de bootstrap e toolchain:
+  - Executa conforme os estágios (pass1, pass2, final).
+  - Monta /dev, /proc, /sys e copia resolv.conf.
+  - Respeita configurações do LFS settingenvironment.
+  - Pode retomar do ponto onde parou (--resume).
+  - Limpa e refaz stage completo (--rebuild-stage).
+
+------------------------------------------------------------
+6.10 audit.sh
+------------------------------------------------------------
+Executa verificações de integridade e segurança:
+  - Busca links quebrados, arquivos órfãos, pacotes com falhas.
+  - Analisa logs antigos e sujeiras.
+  - Corrige automaticamente quando possível.
+  - Gera log detalhado (/var/log/newpkg/audit.log).
+  - Pode reinstalar pacotes corrompidos do cache.
+
+============================================================
+[Fim da Parte 2 - Seções 4 a 6]
+============================================================
+============================================================
+7. PROCESSO DE BUILD COMPLETO
+============================================================
+
+O processo de build do Newpkg segue uma sequência controlada e
+reprodutível. Cada pacote passa por estágios bem definidos que
+asseguram isolamento, reuso de fontes e rastreabilidade total.
+
+------------------------------------------------------------
+7.1 Etapas do processo
+------------------------------------------------------------
+
+1. **Preparação do ambiente**
+   - Criação de diretório temporário de build.
+   - Limpeza de resíduos anteriores, conforme configuração.
+   - Montagem segura de chroot, se habilitado.
+   - Carregamento de variáveis do arquivo newpkg.yaml e do metafile.
+
+2. **Download dos fontes**
+   - Leitura de múltiplos URLs do metafile.
+   - Download em paralelo com `xargs -P` e `curl/wget`.
+   - Verificação de cache (`/var/cache/newpkg`).
+   - Validação por checksum SHA256 se fornecido.
+
+3. **Descompactação**
+   - Identificação automática do formato (.tar.gz, .xz, .bz2, .zst, .zip...).
+   - Extração para o diretório de build especificado no metafile.
+   - Criação automática da pasta `build/` se necessário.
+
+4. **Aplicação de patches**
+   - Aplicação sequencial de patches listados no metafile.
+   - Hooks de pré e pós patch executados, se definidos.
+
+5. **Execução de hooks**
+   - Hooks definidos nos estágios:
+       pre-download, post-download,
+       pre-build, post-build,
+       pre-install, post-install.
+   - Scripts são executados em shell dentro do chroot, com log completo.
+
+6. **Configuração**
+   - Criação de arquivos de configuração exigidos pelo pacote.
+   - Aplicação de variáveis de ambiente (do metafile e do YAML global).
+   - Detecção automática de autotools, meson, cmake ou configure.
+
+7. **Compilação**
+   - Execução paralela conforme `build.parallel`.
+   - Uso automático de `fakeroot` para simular root.
+   - Registro de tempo de build e logs de saída.
+
+8. **Instalação**
+   - Instalação no diretório DESTDIR (isolado).
+   - Empacotamento final com tar + zstd (.tar.zst).
+   - Registro de todos os arquivos instalados no db.sh.
+
+9. **Deploy final**
+   - Se `stage: normal`, instala em `/`.
+   - Se `stage: pass1` ou `pass2`, instala em `/mnt/lfs`.
+   - Permissões e ownership ajustados conforme o estágio (usuário `lfs` em bootstrap).
+
+10. **Finalização**
+    - Desmontagem segura do chroot.
+    - Registro de logs e tempos.
+    - Atualização do banco de dados e auditoria opcional.
+
+------------------------------------------------------------
+7.2 Retomada de builds interrompidos
+------------------------------------------------------------
+
+Se uma compilação for interrompida, o comando:
+    newpkg --install <pacotes>
+verificará o ponto de falha e retomará automaticamente, evitando
+recompilar pacotes que já foram concluídos com sucesso.
+
+O estado é salvo em `/var/lib/newpkg/db/state/` para cada pacote.
+
+------------------------------------------------------------
+7.3 Controle de estágios
+------------------------------------------------------------
+
+Cada metafile define o estágio de build:
+  - `stage: pass1`  → constrói toolchain mínima.
+  - `stage: pass2`  → constrói ambiente de build intermediário.
+  - `stage: normal` → pacotes finais do sistema.
+
+O Newpkg usa essa informação para definir:
+  - Diretório de instalação (`/mnt/lfs` ou `/`).
+  - Usuário (`lfs` ou root).
+  - Flags de compilação adequadas.
+
+------------------------------------------------------------
+7.4 Segurança do chroot
+------------------------------------------------------------
+
+Durante a execução, `core.sh` monta e desmonta:
+
+  /dev      → bind do host
+  /dev/pts  → bind do host
+  /proc     → pseudo filesystem
+  /sys      → pseudo filesystem
+  /run      → bind do host
+
+E copia:
+  /etc/resolv.conf → para garantir acesso à Internet
+
+Ao final, desmonta automaticamente tudo com verificação de segurança.
+Se ocorrer erro, `core.sh` emite alerta e tenta desmontar de forma forçada.
+
+============================================================
+8. CACHE, LOGS E AUDITORIA
+============================================================
+
+O Newpkg mantém um sistema completo de cache e registro para garantir
+reprodutibilidade e diagnóstico rápido.
+
+------------------------------------------------------------
+8.1 Cache de fontes
+------------------------------------------------------------
+
+Local: `/var/cache/newpkg/sources`
+
+- Todos os arquivos baixados são armazenados e reutilizados.
+- Nome do arquivo inclui versão e checksum.
+- O cache pode ser limpo com `newpkg --clean`.
+
+------------------------------------------------------------
+8.2 Cache de pacotes empacotados
+------------------------------------------------------------
+
+Local: `/var/cache/newpkg/packages`
+
+- Contém pacotes .tar.zst prontos para reinstalação.
+- Usado por `upgrade.sh`, `remove.sh` e `audit.sh` em caso de falha.
+- Reutilizado automaticamente se disponível.
+
+------------------------------------------------------------
+8.3 Logs
+------------------------------------------------------------
+
+Local: `/var/log/newpkg/`
+
+- `build_<pkg>.log` → log completo da compilação.
+- `install_<pkg>.log` → registro da instalação.
+- `error_<pkg>.log` → erros detectados.
+- `audit.log` → registros do módulo audit.sh.
+- `sync.log` → sincronização de /usr/ports.
+
+O script `log.sh` adiciona cores e timestamps automáticos.
+Exemplo:
+    [INFO]  [12:44:31] Iniciando build: vim
+    [OK]    [12:45:12] Compilado com sucesso.
+    [WARN]  [12:45:18] Nenhum patch aplicado.
+
+------------------------------------------------------------
+8.4 Auditoria automática
+------------------------------------------------------------
+
+O comando:
+    newpkg --audit
+verifica:
+
+  - Pacotes corrompidos ou incompletos.
+  - Arquivos órfãos não pertencentes a nenhum pacote.
+  - Links simbólicos quebrados.
+  - Logs antigos (>30 dias).
+  - Sujeira em diretórios temporários.
+  - Falhas de segurança conhecidas (via checks locais).
+
+O relatório é salvo em:
+    /var/log/newpkg/audit.log
+
+Opções:
+  --auto-fix → corrige automaticamente.
+  --show-log → exibe o log detalhado no terminal.
+  --dry-run  → apenas simula as correções.
+
+============================================================
+9. GERENCIAMENTO DE DEPENDÊNCIAS
+============================================================
+
+O módulo `deps.py` é responsável por resolver dependências
+automáticas e interativas, utilizando a biblioteca `networkx`.
+
+------------------------------------------------------------
+9.1 Definição de dependências
+------------------------------------------------------------
+
+Cada metafile pode conter:
+Essa interação pode ser desativada com:
+  deps.interactive: false
+no arquivo `newpkg.yaml`.
+
+------------------------------------------------------------
+9.3 Resolução automática
+------------------------------------------------------------
+
+Com `auto_resolve: true`, o deps.py resolve automaticamente as
+dependências ausentes e chama o `core.sh` para construí-las antes
+do pacote principal.
+
+------------------------------------------------------------
+9.4 Verificação reversa (revdep)
+------------------------------------------------------------
+
+O comando:
+    newpkg --revdep
+reconstrói pacotes que dependem de bibliotecas quebradas ou removidas.
+
+O `revdep_depclean.sh` executa automaticamente após remoções e upgrades.
+
+------------------------------------------------------------
+9.5 Limpeza de dependências órfãs
+------------------------------------------------------------
+
+Pacotes que não são mais requeridos são detectados e removidos com:
+    newpkg --depclean
+
+O sistema registra os pacotes removidos e atualiza o banco de dados.
+
+------------------------------------------------------------
+9.6 Visualização de dependências
+------------------------------------------------------------
+
+O deps.py suporta exportação do grafo para arquivo:
+    newpkg --deps vim --export deps_vim.png
+
+Isso gera um gráfico visual usando networkx + matplotlib.
+
+============================================================
+[Fim da Parte 3 - Seções 7 a 9]
+============================================================
+============================================================
+10. REVDEP, DEPCLEAN E REMOÇÃO
+============================================================
+
+O Newpkg mantém a consistência do sistema mesmo após remoções ou
+alterações de pacotes, através de dois mecanismos principais:
+  - revdep (reconstrução de dependências reversas)
+  - depclean (remoção de dependências órfãs)
+
+------------------------------------------------------------
+10.1 revdep (reconstrução reversa)
+------------------------------------------------------------
+
+O comando:
+    newpkg --revdep
+varre o banco de dados em /var/lib/newpkg/db e identifica pacotes
+que dependem de bibliotecas removidas, renomeadas ou corrompidas.
+
+Fluxo de execução:
+
+  1. `revdep_depclean.sh` é invocado.
+  2. Usa `ldd` e `find` para detectar bibliotecas ausentes.
+  3. Usa `deps.py` para mapear dependentes afetados.
+  4. Chama `core.sh` para reconstruir cada pacote afetado.
+  5. Atualiza o db e logs.
+
+Exemplo de saída:
+
+    [INFO]  Pacote 'python' depende de 'libffi.so.8' ausente.
+    [REBUILD]  Reconstruindo libffi...
+    [OK]  libffi reconstruído com sucesso.
+    [REBUILD]  Reconstruindo python...
+    [OK]  python recompilado e reinstalado.
+
+------------------------------------------------------------
+10.2 depclean (limpeza de dependências órfãs)
+------------------------------------------------------------
+
+Executado automaticamente após remoções e upgrades.
+
+Localiza pacotes que:
+  - Não são requeridos por nenhum outro pacote.
+  - Foram instalados como dependência (não manualmente).
+  - Estão marcados como obsoletos no repositório.
+
+Fluxo:
+  1. Gera lista de órfãos.
+  2. Pergunta confirmação (ou executa automaticamente se configurado).
+  3. Remove com `remove.sh` e registra no log.
+
+Comando manual:
+    newpkg --depclean
+
+------------------------------------------------------------
+10.3 remove (remoção completa)
+------------------------------------------------------------
+
+O comando:
+    newpkg --remove <pacote>
+
+Executa a remoção completa de um pacote:
+
+  1. Executa hook pré-remoção.
+  2. Lê o db.sh para obter lista exata de arquivos instalados.
+  3. Remove arquivos, diretórios e symlinks.
+  4. Executa hook pós-remoção.
+  5. Atualiza o banco de dados.
+  6. Executa `revdep_depclean.sh` para restaurar coerência.
+
+A limpeza remove também:
+  - Logs do pacote.
+  - Cache de build e fontes, se configurado.
+  - Entradas antigas no banco de dados.
+
+Exemplo:
+    newpkg -r vim
+
+Saída:
+    [INFO] Removendo vim...
+    [OK]  238 arquivos removidos.
+    [INFO] Executando depclean...
+    [OK]  Sistema limpo.
+
+------------------------------------------------------------
+10.4 Auto-commit e rollback
+------------------------------------------------------------
+
+Com `--auto-commit`, cada operação de remoção gera um commit Git
+automático no repositório /usr/ports (se configurado).
+
+Em caso de falha, é possível restaurar o pacote removido usando:
+    newpkg --fix <pacote>
+
+O `fix` reinstala o pacote diretamente do cache `.tar.zst`.
+
+============================================================
+11. UPGRADE E RECONSTRUÇÃO AUTOMÁTICA
+============================================================
+
+O upgrade é uma das funções mais robustas do Newpkg. Ele combina
+reinstalação controlada, rollback automático e reconstrução de
+dependências quebradas.
+
+------------------------------------------------------------
+11.1 Upgrade normal
+------------------------------------------------------------
+
+Comando:
+    newpkg --upgrade [pacote(s)]
+
+Fluxo de execução:
+  1. Atualiza /usr/ports via sync.sh (opcional).
+  2. Verifica versões atuais e novas.
+  3. Faz backup do pacote atual (.tar.zst).
+  4. Reinstala o novo pacote com core.sh.
+  5. Em caso de falha:
+        - Restaura o pacote anterior.
+        - Registra falha no log.
+  6. Executa revdep para pacotes dependentes.
+
+------------------------------------------------------------
+11.2 Upgrade total
+------------------------------------------------------------
+
+Comando:
+    newpkg --upgrade-all
+
+Reinstala todos os pacotes que possuam atualização disponível no
+repositório Git.  
+Pode ser combinado com:
+    --parallel N   → executa builds simultâneos
+    --resume       → continua após falha
+    --auto-commit  → registra commits automáticos
+
+------------------------------------------------------------
+11.3 Reconstrução de pacotes quebrados
+------------------------------------------------------------
+
+Durante o upgrade, se um pacote falhar, o sistema registra o ponto
+e cria uma entrada em `/var/lib/newpkg/db/failures/`.
+
+O comando:
+    newpkg --resume
+retoma exatamente do pacote com falha, preservando os anteriores.
+
+------------------------------------------------------------
+11.4 Rollback de versões
+------------------------------------------------------------
+
+Pacotes anteriores são mantidos no cache:
+    /var/cache/newpkg/packages/
+
+Para restaurar:
+    newpkg --rollback <pacote>
+
+O sistema remove a versão atual e reinstala a anterior a partir do
+tarball local.
+
+------------------------------------------------------------
+11.5 Integração com deps.py e revdep
+------------------------------------------------------------
+
+Durante upgrades, o Newpkg:
+  - Usa deps.py para determinar pacotes impactados.
+  - Reconstrói automaticamente dependentes.
+  - Executa revdep após conclusão.
+
+------------------------------------------------------------
+11.6 Upgrade seguro com auditoria
+------------------------------------------------------------
+
+Antes de cada atualização, o sistema executa um check rápido via
+audit.sh para verificar:
+  - integridade de pacotes atuais
+  - espaço em disco suficiente
+  - presença de fontes e patches válidos
+
+Se falhar, o upgrade é abortado para evitar corrupção.
+
+============================================================
+12. SINCRONIZAÇÃO E REPOSITÓRIOS GIT
+============================================================
+
+O diretório `/usr/ports` é a base do Newpkg. Ele contém os
+metafiles (descritores de pacotes) e é sincronizado com um
+repositório Git remoto.
+
+------------------------------------------------------------
+12.1 Comando básico
+------------------------------------------------------------
+
+    newpkg --sync
+
+Por padrão, sincroniza o branch definido em `newpkg.yaml`.
+
+Fluxo:
+  1. Verifica conectividade com o remoto.
+  2. Puxa as atualizações (`git pull`).
+  3. Atualiza logs e cache.
+  4. Executa hooks pós-sync, se existirem.
+
+------------------------------------------------------------
+12.2 Opções de sincronização
+------------------------------------------------------------
+
+  --branch <nome>     → Força sincronização de branch alternativo.
+  --dry-run           → Mostra alterações sem aplicar.
+  --quiet             → Suprime mensagens de status.
+  --auto-commit       → Faz commit automático de modificações locais.
+
+------------------------------------------------------------
+12.3 Paralelismo
+------------------------------------------------------------
+
+Internamente, `sync.sh` usa `xargs -P` para paralelizar clones e
+atualizações em múltiplos repositórios (submódulos ou mirrors).
+
+------------------------------------------------------------
+12.4 Estrutura dos metafiles
+------------------------------------------------------------
+
+Cada pacote em `/usr/ports/<categoria>/<nome>/` contém:
+O `metafile.yaml` define:
+  - nome, versão, release
+  - urls de download
+  - stage de build (pass1, pass2, normal)
+  - dependências
+  - patches e hooks
+  - ambiente de build
+  - diretório de build e comandos customizados
+
+------------------------------------------------------------
+12.5 Atualização automática
+------------------------------------------------------------
+
+Com `auto_commit: true` e `git.auto_commit: true` no YAML global,
+toda modificação local (como novos pacotes ou ajustes) é commitada
+automaticamente com mensagem:
+
+    [newpkg] Atualização automática em <data>
+
+------------------------------------------------------------
+12.6 Falhas e recuperação
+------------------------------------------------------------
+
+Se ocorrer erro de rede ou conflito Git:
+  - O sistema salva o log em `/var/log/newpkg/sync.log`.
+  - Exibe mensagem de erro colorida.
+  - Permite retry automático com `--retry`.
+
+============================================================
+[Fim da Parte 4 - Seções 10 a 12]
+============================================================
+============================================================
+13. BOOTSTRAP E TOOLCHAIN
+============================================================
+
+O módulo `bootstrap.sh` é responsável por criar um ambiente
+isolado e reproduzível para compilar o sistema base (toolchain)
+seguindo as práticas do Linux From Scratch.
+
+------------------------------------------------------------
+13.1 Estrutura geral do bootstrap
+------------------------------------------------------------
+
+O processo ocorre em estágios (stages) definidos no diretório:
+    /usr/share/newpkg/stages/
+
+Cada stage contém um arquivo YAML descritivo:
+    gcc-pass1.yaml
+    gcc-pass2.yaml
+    binutils-pass1.yaml
+    glibc-final.yaml
+
+Cada YAML define:
+  - fonte e versão
+  - dependências necessárias
+  - comandos de build
+  - variáveis de ambiente
+  - hooks específicos
+
+------------------------------------------------------------
+13.2 Preparação do ambiente
+------------------------------------------------------------
+
+Antes de iniciar, é necessário:
+  - Criar o ponto de montagem `/mnt/lfs`
+  - Definir a variável `LFS=/mnt/lfs`
+  - Criar diretórios básicos:
+------------------------------------------------------------
+13.3 Montagem e desmontagem seguras
+------------------------------------------------------------
+
+O Newpkg realiza as montagens conforme o livro LFS:
+Ao sair do chroot, desmonta em ordem reversa automaticamente.
+
+------------------------------------------------------------
+13.4 Execução dos stages
+------------------------------------------------------------
+
+Comando:
+    newpkg --bootstrap [--stage <nome>] [--resume] [--rebuild]
+
+Fluxo:
+  1. Cria ambiente de chroot isolado.
+  2. Lê o stage YAML (ex: `gcc-pass1.yaml`).
+  3. Baixa e descompacta os fontes.
+  4. Executa o build e instala no `/mnt/lfs/tools`.
+  5. Registra logs e status de cada etapa.
+
+Exemplo:
+    newpkg --bootstrap --stage gcc-pass1
+
+------------------------------------------------------------
+13.5 Opção --resume e --rebuild
+------------------------------------------------------------
+
+- `--resume`: continua do último pacote interrompido.
+- `--rebuild`: apaga o stage atual e recompila todos os pacotes.
+
+------------------------------------------------------------
+13.6 Configuração do ambiente (settingenvironment)
+------------------------------------------------------------
+
+Baseado no capítulo:
+https://www.linuxfromscratch.org/lfs/view/stable/chapter04/settingenvironment.html
+
+Durante o bootstrap, o `bootstrap.sh` cria e exporta automaticamente:
+e configura o perfil do usuário `lfs` conforme o padrão do LFS.
+
+------------------------------------------------------------
+13.7 Finalização do bootstrap
+------------------------------------------------------------
+
+Após todos os stages, o toolchain estará pronto em `$LFS/tools`.
+O Newpkg então:
+  - Gera um snapshot `.tar.zst` do toolchain.
+  - Atualiza o banco de dados local.
+  - Permite iniciar o build dos pacotes do sistema base via `core.sh`.
+
+============================================================
+14. DESENVOLVIMENTO E CRIAÇÃO DE PACOTES
+============================================================
+
+O Newpkg permite criar novos pacotes de forma modular e declarativa.
+
+------------------------------------------------------------
+14.1 Estrutura de um pacote em /usr/ports
+------------------------------------------------------------
+
+Cada pacote possui a seguinte estrutura:
+------------------------------------------------------------
+14.3 Criação automática de novos pacotes
+------------------------------------------------------------
+
+Comando:
+    newpkg --new <nome>
+
+Cria a estrutura base do pacote em `/usr/ports/local/<nome>/`.
+
+------------------------------------------------------------
+14.4 Empacotamento manual
+------------------------------------------------------------
+
+Após compilar um pacote manualmente dentro de um chroot, é possível
+empacotá-lo com:
+
+    newpkg --pack <dir>
+
+Gera um `.tar.zst` e registra no banco de dados.
+
+------------------------------------------------------------
+14.5 Geração de configuração automática
+------------------------------------------------------------
+
+Se o programa exigir um arquivo de configuração inicial, o campo
+`config_file:` no metafile YAML indica que ele deve ser criado no
+diretório apropriado após a instalação.
+
+============================================================
+15. MANUTENÇÃO, RECUPERAÇÃO E BOAS PRÁTICAS
+============================================================
+
+------------------------------------------------------------
+15.1 Limpeza periódica
+------------------------------------------------------------
+
+Use o comando:
+    newpkg --clean
+
+Para remover:
+  - cache antigo
+  - fontes obsoletos
+  - logs antigos
+  - pacotes reconstruídos
+
+------------------------------------------------------------
+15.2 Auditoria automática
+------------------------------------------------------------
+
+O comando:
+    newpkg --audit
+
+Executa `audit.sh`, que:
+  - verifica integridade de pacotes
+  - identifica arquivos órfãos
+  - detecta vulnerabilidades conhecidas
+  - limpa sujeiras do sistema
+  - gera log em `/var/log/newpkg/audit.log`
+
+Para ver o log:
+    newpkg --audit-log
+
+------------------------------------------------------------
+15.3 Recuperação de sistema
+------------------------------------------------------------
+
+Se um pacote ou biblioteca essencial for corrompido:
+    newpkg --fix <pacote>
+
+Reinstala o pacote a partir do cache local.
+
+------------------------------------------------------------
+15.4 Exportação e backup
+------------------------------------------------------------
+
+Crie um snapshot completo do sistema:
+    newpkg --snapshot
+
+Gera um arquivo `.tar.zst` contendo:
+  - banco de dados do newpkg
+  - lista de pacotes instalados
+  - cache de fontes
+
+------------------------------------------------------------
+15.5 Boas práticas recomendadas
+------------------------------------------------------------
+
+- Sempre use `--resume` ao refazer builds longos.
+- Evite compilar pacotes fora do chroot.
+- Mantenha `/usr/ports` sincronizado regularmente.
+- Faça auditorias com `--audit` semanalmente.
+- Não remova pacotes essenciais manualmente.
+- Revise `newpkg.yaml` sempre que alterar caminhos ou políticas.
+
+------------------------------------------------------------
+15.6 Logs e rastreabilidade
+------------------------------------------------------------
+
+Todos os logs são mantidos em:
+    /var/log/newpkg/
+Com nomes:
+    build.log
+    remove.log
+    upgrade.log
+    sync.log
+    audit.log
+
+Os logs são coloridos, datados e possuem níveis:
+  - [INFO]
+  - [WARN]
+  - [ERROR]
+  - [OK]
+
+============================================================
+[Fim da Parte 5 - Seções 13 a 15]
+============================================================
