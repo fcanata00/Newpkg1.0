@@ -178,6 +178,9 @@ Comandos e abreviações
   -h,  --help                    Mostra ajuda resumida.
   -m,  --menu                    Abre o menu textual interativo.
 
+--------------------
+sudo newpkg --config /etc/newpkg/newpkg_lfs.yaml install binutils gcc glibc
+sudo newpkg --config /etc/newpkg/newpkg_lfs.yaml bootstrap --run pass1 
 ------------------------------------------------------------
 Menu textual
 ------------------------------------------------------------
