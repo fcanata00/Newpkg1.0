@@ -1,121 +1,167 @@
-# meta.yaml - exemplo completo
-name: mypkg
-version: 1.2.3
-arch: x86_64
-origin: "category/mypkg"      # caminho relativo em /usr/ports (usado por sync/db)
-stage: pass1                  # pass1 | pass2 | normal
-description: "Descrição curta"
-maintainer: "you <you@example.org>"
-license: MIT
+# ==============================================================================
+# metafile.yaml — Exemplo completo do formato suportado pelo Newpkg
+# Local padrão: /usr/ports/<categoria>/<pacote>/metafile.yaml
+# ==============================================================================
 
-# --- sources: múltiplos downloads permitidos (ordem de fallback) ---
-sources:
-  - url: "https://example.org/mypkg-1.2.3.tar.xz"
-    sha256: "abcdef1234..."
-    signature: "https://example.org/mypkg-1.2.3.tar.xz.sig"
-    type: "tar.xz"
-  - url: "git+https://github.com/author/mypkg.git@v1.2.3"
-    type: "git"
-  - url: "rsync://mirror.example.org/mypkg/1.2.3/mypkg.tar.gz"
-    type: "tar.gz"
+# 🏷️ Nome e versão do pacote
+name: example              # Nome do pacote
+version: 1.0.0             # Versão atual
+release: 1                 # Incrementa a cada rebuild
+epoch: 0                   # Número de epoch (caso precise forçar upgrade)
 
-# --- opcional: nome da pasta build e criação automática ---
-build:
-  build_dir_name: "mypkg-build"     # nome da pasta onde extrair e compilar (se omitido: autodetect)
-  create_build_dir: true            # se true, core.sh cria automaticamente
-  create_config_file: true          # se true, gerar um arquivo de config (veja abaixo)
-  config_template: |
-    # arquivo de configuração gerado automaticamente
-    option_a = true
-    option_b = "/usr/local"
-  buildsystem: autotools            # autotools|cmake|meson|python|make|custom
-  configure_flags: ["--prefix=/usr", "--enable-feature-x"]
-  make_jobs: null                   # null -> usar default/jobs do sistema
+# 📦 Categoria e descrição
+category: utils            # Categoria no /usr/ports
+summary: "Exemplo completo de pacote para o Newpkg"
+description: |
+  Este é um pacote de exemplo que demonstra todas as opções
+  suportadas no formato de metafile.yaml do Newpkg. Ele cobre
+  fases de build, patch, hooks, dependências e estágios especiais.
 
-# --- environment: exportado para o ambiente de build (aplicável em chroot) ---
+# 🧩 Estágio de construção
+#   - normal → instala em /
+#   - pass1  → instala em /mnt/lfs com usuário lfs
+#   - pass2  → instala em /mnt/lfs após toolchain inicial
+stage: normal
+
+# ⚙️ Ambiente do build
 environment:
-  CFLAGS: "-O2 -g"
-  LDFLAGS: "-Wl,-O1"
-  PATH: "/usr/bin:/bin:/usr/local/bin"
-  EXTRA_ENV:
-    - "SOMEVAR=value"
-    - "OTHER=val"
+  CC: gcc
+  CXX: g++
+  CFLAGS: "-O2 -pipe"
+  CXXFLAGS: "-O2 -pipe"
+  LDFLAGS: "-Wl,-O1,--as-needed"
+  PKG_CONFIG_PATH: "/usr/lib/pkgconfig:/usr/share/pkgconfig"
+  PATH: "/usr/bin:/bin:/usr/sbin:/sbin"
+  LANG: "en_US.UTF-8"
+  MAKEFLAGS: "-j$(nproc)"
 
-# --- patches: lista aplicada (pode ser patch file relativo ao port dir) ---
+# 🌐 Fontes (pode listar múltiplos mirrors)
+source:
+  - https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz
+  - https://mirror.example.org/hello-2.12.tar.gz
+
+# 🧾 Sums de integridade (opcional, pode ser sha256/sha512/md5)
+checksums:
+  sha256: 31e7b1e1ef00e784bc1bafbb3f61e62c7cde4a4e3de8cfb1db4e97a1ef3a49e7
+
+# 📦 Nome da pasta gerada após extração (opcional)
+build_dir: hello-2.12
+
+# 📜 Patches aplicados automaticamente (ordem importa)
 patches:
-  - "patches/fix-linker.patch"
-  - "patches/0002-enable-compat.patch"
+  - fix-locale.patch
+  - disable-tests.patch
 
-# --- hooks (por estágio) ---
-hooks:
-  pre_fetch:
-    - "hooks/pre_fetch/10-prepare-mirror.sh"
-  post_extract:
-    - "hooks/post_extract/10-fix-perms.sh"
-  pre_build:
-    - "hooks/pre_build/05-generate-config.sh"
-  post_install:
-    - "hooks/post_install/10-strip-binaries.sh"
-  pre_remove:
-    - "hooks/pre_remove/10-save-config.sh"
-  post_remove:
-    - "hooks/post_remove/10-cleanup-logs.sh"
+# ⚒️ Comandos de build (customizados)
+# Se não forem definidos, o core.sh tentará usar "./configure && make"
+build:
+  - ./configure --prefix=/usr --sysconfdir=/etc
+  - make
 
-# --- dependencies ---
+# 📥 Comandos de instalação
+# Se não definidos, o core.sh usa "make DESTDIR=\$DESTDIR install"
+install:
+  - make DESTDIR=$DESTDIR install
+  - install -v -m755 hello /usr/bin/hello
+
+# 📂 Arquivo de configuração (gerado antes do build, se necessário)
+# Pode ser usado para criar arquivos temporários de build.
+config_files:
+  - path: config.mk
+    content: |
+      PREFIX = /usr
+      CFLAGS = -O2 -pipe
+
+# 🧷 Dependências
+# São resolvidas automaticamente pelo módulo deps.py
 depends:
   build:
-    - "pkg-config"
-    - "libfoo>=1.0"
-  run:
-    - "libbar>=2.0"
-  optional:
-    - "docviewer"
+    - gcc
+    - make
+    - coreutils
+  runtime:
+    - glibc
+    - bash
 
-# --- provides / conflicts / replaces ---
-provides:
-  - "mypkg"
-conflicts:
-  - "otherpkg < 2.0"
-replaces: []
+# 🧩 Dependências opcionais
+optional_depends:
+  - texinfo
+  - man-db
 
-# --- metadata de empacotamento ---
-packaging:
-  compress: true                   # true|false (se false -> não comprimir)
-  compression: "zstd"              # zstd|gzip|xz
-  compression_args: "-19"          # argumentos para compressor
-  manifest_format: "newpkg-manifest-v1"
+# 🧰 Ferramentas exigidas apenas em bootstrap (pass1/pass2)
+bootstrap_tools:
+  - binutils
+  - gcc
+  - bash
 
-# --- policies específicas por stage (overrides) ---
-stage_overrides:
-  pass1:
-    install_prefix: "/mnt/lfs"      # onde será instalado durante pass1
-    do_not_compress: true
-    run_as_user: "lfs"              # usuário para testes (o core.sh deve rodar testes sob este user dentro de chroot)
-  pass2:
-    install_prefix: "/mnt/lfs"
-    do_not_compress: true
-    run_as_user: "lfs"
-  normal:
-    install_prefix: "/"             # instalação final no sistema
-    do_not_compress: false
-    run_as_user: "root"
+# ⚙️ Arquivos de hooks específicos deste pacote (executados se existirem)
+# Estes scripts devem estar dentro de /usr/ports/<pkg>/scripts/
+hooks:
+  pre_download:   scripts/pre-download.sh
+  post_download:  scripts/post-download.sh
+  pre_build:      scripts/pre-build.sh
+  post_build:     scripts/post-build.sh
+  pre_install:    scripts/pre-install.sh
+  post_install:   scripts/post-install.sh
+  pre_remove:     scripts/pre-remove.sh
+  post_remove:    scripts/post-remove.sh
 
-# --- build/test commands customizados (opcional) ---
-commands:
-  prepare: |
-    autoreconf -vfi
-  build: |
-    ./configure --prefix=/usr ${CONFIGURE_FLAGS}
-    make -j$(nproc)
-  install: |
-    make DESTDIR=${DESTDIR} install
+# 🔁 Testes pós-build (executados se existir target "check" no Makefile)
+test:
+  - make check || true
 
-# --- optional: user-facing flags ---
-flags:
-  interactive: false
-  skip_tests: false
+# 🧹 Limpeza extra após instalação (executada no DESTDIR)
+cleanup:
+  - rm -rf $DESTDIR/usr/share/doc/hello
 
-# --- optional: extra files to include in the package root (manifests, license) ---
-extra_files:
-  - "LICENSE"
-  - "README.md"
+# 🧩 Usuário/grupo a ser criado durante a instalação
+users:
+  - name: example
+    uid: 3001
+    gid: 3001
+    home: /var/lib/example
+    shell: /sbin/nologin
+
+groups:
+  - name: example
+    gid: 3001
+
+# 📦 Arquivos de pós-instalação (executados fora do chroot)
+post_install_actions:
+  - update-desktop-database || true
+  - ldconfig || true
+
+# 🗂️ Diretórios para preservar em upgrade/removal
+preserve_paths:
+  - /etc/example.conf
+  - /var/lib/example/
+
+# 🔒 Políticas de segurança específicas do pacote
+security:
+  sandbox: true          # Executa em ambiente isolado
+  restricted_network: true
+  drop_privileges: true
+  forbid_root_build: false
+
+# 🧱 Testes adicionais de integridade
+integrity:
+  check_symlinks: true
+  check_permissions: true
+  fix_on_error: true
+
+# 📦 Empacotamento
+package:
+  format: tar.zst        # Formato final (tar.zst, tar.xz, etc.)
+  compression_level: 19
+  include_docs: true
+  include_manpages: true
+  include_locales: false
+  output_dir: /var/cache/newpkg/packages
+
+# 🧾 Informações extras
+metadata:
+  maintainer: "Fernando Canata <fernando@example.org>"
+  license: GPL-3.0-or-later
+  homepage: https://www.gnu.org/software/hello/
+  repository: https://github.com/fernando/newpkg-ports
+  bugtracker: https://github.com/fernando/newpkg-ports/issues
