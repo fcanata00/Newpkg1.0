@@ -1,0 +1,171 @@
+# ==============================================================================
+# metafile.yaml — GCC Pass 1 para Newpkg / LFS
+# Local sugerido: /usr/ports/toolchain/gcc-pass1/metafile.yaml
+# Baseado no capítulo “GCC-Pass1” do LFS stable (GCC versão declarada no livro)
+# ==============================================================================
+
+name: gcc-pass1
+version: 15.2.0         # exemplo (pode ajustar para a versão que você estiver usando)
+release: 1
+epoch: 0
+category: toolchain
+summary: "GCC – Pass 1 (toolchain inicial para construção LFS)"
+description: |
+  Esta é a primeira fase de compilação do GCC, visando construir um compilador
+  cruzado mínimo que será usado para construir o glibc e continuar o toolchain
+  no ambiente LFS isolado.
+
+stage: pass1
+
+# --- Fontes necessárias ---
+source:
+  - https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz
+  - https://ftpmirror.gnu.org/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz
+
+# Dependências adicionais (GMP, MPFR, MPC) que serão “embutidas”
+# Elas devem estar no mesmo diretório de fontes ou no cache para serem extraídas dentro do diretório gcc
+source_extra:
+  gmp:
+    url: https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+    md5: ""   # opcional
+    sha256: ""  # opcional — preencha se possível
+  mpfr:
+    url: https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz
+    md5: ""
+    sha256: ""
+  mpc:
+    url: https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz
+    md5: ""
+    sha256: ""
+
+build_dir: gcc-15.2.0
+
+# --- Ambiente para build ---
+environment:
+  LFS: "/mnt/lfs"
+  LFS_TGT: "$(uname -m)-lfs-linux-gnu"
+  PATH: "/mnt/lfs/tools/bin:/usr/bin:/bin"
+  MAKEFLAGS: "-j$(nproc)"
+  CONFIG_SITE: "/usr/share/config.site"
+  LC_ALL: "C"
+  LANG: "C.UTF-8"
+  CFLAGS: "-O2 -pipe"
+  CXXFLAGS: "-O2 -pipe"
+  SHELL: "/bin/bash"
+
+# Dependências (para resolver via deps.py, embora build deste passo seja isolado)
+depends:
+  build:
+    - gcc   # host gcc para compilar
+    - make
+    - glibc
+  runtime:
+    - bash
+
+bootstrap_tools:
+  - gcc
+  - make
+  - binutils
+
+# --- Comandos de construção (metodologia do livro) ---
+build:
+  # extrair os extras dentro da árvore de fontes gcc
+  - tar -xf ../mpfr-4.2.2.tar.xz
+  - mv -v mpfr mpfr
+  - tar -xf ../gmp-6.3.0.tar.xz
+  - mv -v gmp gmp
+  - tar -xf ../mpc-1.3.1.tar.gz
+  - mv -v mpc mpc
+
+  # se for host x86_64, ajustar t-linux64 para usar “lib” em vez de “lib64”
+  - |
+    case $(uname -m) in
+      x86_64)
+        sed -e '/m64=/s/lib64/lib/' -i gcc/config/i386/t-linux64
+        ;;
+    esac
+
+  - mkdir -v build
+  - cd build
+  - ../configure \
+        --target=$LFS_TGT \
+        --prefix=/mnt/lfs/tools \
+        --with-glibc-version=2.44 \
+        --with-sysroot=/mnt/lfs \
+        --with-newlib \
+        --without-headers \
+        --disable-nls \
+        --disable-shared \
+        --disable-multilib \
+        --disable-threads \
+        --disable-libatomic \
+        --disable-libgomp \
+        --disable-libquadmath \
+        --disable-libssp \
+        --disable-libvtv \
+        --disable-libstdcxx \
+        --enable-languages=c,c++ \
+        --enable-default-pie \
+        --enable-default-ssp \
+        --disable-libsanitizer \
+        --disable-libmpx
+
+  - make
+
+# --- Instalação ---
+install:
+  - cd build
+  - make install
+  # gerar limits.h conforme o livro
+  - cd ..
+  - cat gcc/limitx.h gcc/glimits.h gcc/limity.h > \
+      `dirname $($LFS_TGT-gcc -print-libgcc-file-name)`/include/limits.h
+
+# --- Hooks (opcionais) ---
+hooks:
+  pre_build: scripts/pre-build.sh
+  post_build: scripts/post-build.sh
+  post_install: scripts/post-install.sh
+
+# --- Limpeza extra após build ---
+cleanup:
+  - rm -rf $PWD/build
+
+# --- Políticas específicas deste pacote ---
+build_policy:
+  continue_on_error: false
+  require_chroot: true
+  run_as_user: lfs
+  sandbox: true
+  isolated_env: true
+  preserve_env: false
+
+security:
+  drop_privileges: true
+  forbid_root_build: true
+  sandbox: true
+  restricted_network: true
+
+# --- Empacotamento ---
+package:
+  format: tar.zst
+  compression_level: 19
+  output_dir: /mnt/lfs/packages
+  include_docs: false
+  include_manpages: false
+  include_locales: false
+
+# --- Metadata ---
+metadata:
+  maintainer: "Fernando Canata <fernando@example.org>"
+  license: GPL-3.0-or-later
+  homepage: https://gcc.gnu.org/
+  section: "Toolchain, Pass 1"
+
+notes: |
+  No passo 1 do GCC, não temos glibc instalados no ambiente alvo, então usamos
+  --with-newlib e --without-headers conforme o livro.  
+  A linha de criação de limits.h é necessária para que o compilador interno
+  possa ter um header mínimo antes da instalação do glibc.
+  Certifique-se de que os tarballs GMP, MPFR e MPC estejam no diretório de fontes
+  ou no cache para serem incluídos na compilação.
