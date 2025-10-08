@@ -1,0 +1,136 @@
+# ==============================================================================
+# metafile.yaml — Glibc (Linux From Scratch)  
+# Local sugerido: /usr/ports/system/glibc/metafile.yaml  
+# Baseado no capítulo “Glibc” do LFS stable 0
+# ==============================================================================
+
+name: glibc
+version: 2.42
+release: 1
+epoch: 0
+category: system
+summary: "GNU C Library (glibc) para LFS"
+description: |
+  A glibc é a biblioteca C padrão do sistema Linux, responsável por
+  operações básicas como I/O, alocação de memória, manipulação de strings,
+  chamadas de sistema e muito mais.  
+  No contexto do LFS, os cabeçalhos do kernel já foram instalados e agora
+  construímos a glibc usando a toolchain provisória do pass1.
+
+stage: normal
+
+# Fontes
+source:
+  - https://ftp.gnu.org/gnu/libc/glibc-2.42.tar.xz
+  - https://ftpmirror.gnu.org/libc/glibc-2.42.tar.xz
+
+checksums:
+  sha256: 00f8f06c5eacb7d0b1e2f8ae527d9e4a7622fa354d10d5d7f21a0f2e7fa8d1ce
+
+build_dir: glibc-2.42
+
+# Ambiente necessário
+environment:
+  LFS: "/mnt/lfs"
+  LFS_TGT: "$(uname -m)-lfs-linux-gnu"
+  PATH: "/mnt/lfs/tools/bin:/usr/bin:/bin"
+  MAKEFLAGS: "-j$(nproc)"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  SHELL: "/bin/bash"
+  CFLAGS: ""                # geralmente não define CFLAGS
+  CXXFLAGS: ""
+  CONFIG_SITE: "/usr/share/config.site"
+
+# Dependências (determinadas via deps.py)
+depends:
+  build:
+    - gcc
+    - make
+  runtime:
+    - coreutils
+    - bash
+
+bootstrap_tools:
+  - gcc
+  - make
+  - binutils
+
+# Patches aplicados (exemplo: patch FHS) — se necessário
+patches:
+  - glibc-2.42-fhs-1.patch
+
+# Comandos de build
+build:
+  - mkdir -v build
+  - cd build
+  - echo "rootsbindir=/usr/sbin" > configparms
+  - ../configure \
+        --prefix=/usr \
+        --host=$LFS_TGT \
+        --build=$(../scripts/config.guess) \
+        --disable-werror \
+        libc_cv_slibdir=/usr/lib \
+        --enable-kernel=5.4 \
+        --disable-nscd
+  - make
+
+# Testes (make check) — algumas falhas podem ser ignoradas
+test:
+  - make check || true
+
+# Instalação
+install:
+  - cd build
+  - make DESTDIR=$LFS install
+  - sed '/RTLDLIST=/s@/usr@@g' -i $LFS/usr/bin/ldd
+
+# Pós-instalações necessárias
+post_install_actions:
+  - case $(uname -m) in i?86) ln -sfv ld-linux.so.2 $LFS/lib/ld-lsb.so.3 ;; x86_64) ln -sfv ../lib/ld-linux-x86-64.so.2 $LFS/lib64 && ln -sfv ../lib/ld-linux-x86-64.so.2 $LFS/lib64/ld-lsb-x86-64.so.3 ;; esac
+  - touch $LFS/etc/ld.so.conf
+  - sed '/test-installation/s@$(PERL)@echo not running@' -i ../Makefile || true
+
+# Hooks opcionais
+hooks:
+  pre_build: scripts/pre-build.sh
+  post_install: scripts/post-install.sh
+
+# Limpeza extra
+cleanup:
+  - rm -rf $PWD/build
+
+# Políticas específicas
+build_policy:
+  continue_on_error: false
+  require_chroot: true
+  run_as_user: lfs
+  sandbox: true
+  isolated_env: true
+  preserve_env: false
+
+security:
+  drop_privileges: true
+  forbid_root_build: true
+  sandbox: true
+  restricted_network: true
+
+# Empacotamento
+package:
+  format: tar.zst
+  compression_level: 19
+  output_dir: /mnt/lfs/packages
+  include_docs: false
+  include_manpages: false
+  include_locales: false
+
+metadata:
+  maintainer: "Fernando Canata <fernando@example.org>"
+  license: LGPL-2.1-or-later
+  homepage: https://www.gnu.org/software/libc/
+  section: "System Libraries"
+
+notes: |
+  Durante a construção, alguns testes falham — verifique quais são seguros ignorar.
+  A criação de links e ajustes no ldd são essenciais para compatibilidade com o
+  ambiente LFS conforme descrito no livro. 1
