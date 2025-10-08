@@ -1,31 +1,25 @@
-sudo tee /usr/bin/newpkg > /dev/null <<'EOF'
 #!/usr/bin/env bash
-#
-# newpkg - unified CLI front-end for the newpkg ecosystem
-# Paths adjusted to modules under /usr/share/newpkg/
-#
-# Save as /usr/bin/newpkg  and make executable: chmod +x /usr/bin/newpkg
-#
+# /usr/bin/newpkg - unified CLI for newpkg (final)
+# Save with: sudo tee /usr/bin/newpkg > /dev/null <<'EOF' ... EOF
 set -o errexit
 set -o nounset
 set -o pipefail
 IFS=$'\n\t'
 
 VERSION="1.0.0"
-# Module locations (adjusted per request)
 BASE_SHARE="/usr/share/newpkg"
-CORE_SH="${CORE_SH:-${BASE_SHARE}/core.sh}"
-DB_SH="${DB_SH:-${BASE_SHARE}/db.sh}"
-LOG_SH="${LOG_SH:-${BASE_SHARE}/log.sh}"
-DEPS_PY="${DEPS_PY:-${BASE_SHARE}/deps.py}"
-REVDEP_SH="${REVDEP_SH:-${BASE_SHARE}/revdep_depclean.sh}"
-REMOVE_SH="${REMOVE_SH:-${BASE_SHARE}/remove.sh}"
-UPGRADE_SH="${UPGRADE_SH:-${BASE_SHARE}/upgrade.sh}"
-BOOTSTRAP_SH="${BOOTSTRAP_SH:-${BASE_SHARE}/bootstrap.sh}"
-AUDIT_SH="${AUDIT_SH:-${BASE_SHARE}/audit.sh}"
-SYNC_SH="${SYNC_SH:-${BASE_SHARE}/sync.sh}"
+LIB_DIR="${BASE_SHARE}/lib"
+CORE_SH="${CORE_SH:-${LIB_DIR}/core.sh}"
+DB_SH="${DB_SH:-${LIB_DIR}/db.sh}"
+LOG_SH="${LOG_SH:-${LIB_DIR}/log.sh}"
+DEPS_PY="${DEPS_PY:-${LIB_DIR}/deps.py}"
+REVDEP_SH="${REVDEP_SH:-${LIB_DIR}/revdep_depclean.sh}"
+REMOVE_SH="${REMOVE_SH:-${LIB_DIR}/remove.sh}"
+UPGRADE_SH="${UPGRADE_SH:-${LIB_DIR}/upgrade.sh}"
+BOOTSTRAP_SH="${BOOTSTRAP_SH:-${LIB_DIR}/bootstrap.sh}"
+AUDIT_SH="${AUDIT_SH:-${LIB_DIR}/newpkg_audit.sh}"
+SYNC_SH="${SYNC_SH:-${LIB_DIR}/sync.sh}"
 
-# Paths & defaults
 ETC_DIR="${ETC_DIR:-/etc/newpkg}"
 CONFIG_FILE="${CONFIG_FILE:-${ETC_DIR}/newpkg.yaml}"
 LOG_DIR="${LOG_DIR:-/var/log/newpkg}"
@@ -34,95 +28,57 @@ PORTS_DIR="${PORTS_DIR:-/usr/ports}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/newpkg}"
 LFS_ROOT="${LFS_ROOT:-/mnt/lfs}"
 
-# Tools
 YQ="$(command -v yq || true)"
 JQ="$(command -v jq || true)"
 TPUT="$(command -v tput || true)"
 
-# runtime flags
 DRY_RUN=0
 QUIET=0
 AUTO=0
 COMMAND=""
 ARGS=()
 
-# Colors
 if [[ -n "$TPUT" && -t 1 ]]; then
-  NC="$(tput sgr0)"
-  RED="$(tput setaf 1)"
-  GREEN="$(tput setaf 2)"
-  YELLOW="$(tput setaf 3)"
-  BLUE="$(tput setaf 4)"
-  BOLD="$(tput bold)"
+  NC="$(tput sgr0)"; RED="$(tput setaf 1)"; GREEN="$(tput setaf 2)"
+  YELLOW="$(tput setaf 3)"; BLUE="$(tput setaf 4)"; BOLD="$(tput bold)"
 else
   NC=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""
 fi
 
-# Logging (use log.sh if provided)
-if [[ -f "$LOG_SH" ]]; then
-  # shellcheck source=/usr/share/newpkg/log.sh
-  source "$LOG_SH" || true
-fi
-
 _log_local() {
-  local level="$1"; shift
-  local msg="$*"
-  local ts; ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local level="$1"; shift; local msg="$*"; local ts; ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   printf '%s [%s] %s\n' "$ts" "$level" "$msg"
   mkdir -p "$LOG_DIR"
   printf '%s [%s] %s\n' "$ts" "$level" "$msg" >> "$LOG_DIR/newpkg.log"
 }
-info()  { [[ $QUIET -eq 0 ]] && { if declare -F log_info >/dev/null 2>&1; then log_info "$@"; else _log_local INFO "$@"; fi } }
-warn()  { if declare -F log_warn >/dev/null 2>&1; then log_warn "$@"; else _log_local WARN "$@"; fi }
-error() { if declare -F log_error >/dev/null 2>&1; then log_error "$@"; else _log_local ERROR "$@"; fi }
+info()  { [[ $QUIET -eq 0 ]] && _log_local "INFO" "$*"; }
+warn()  { _log_local "WARN" "$*"; }
+error() { _log_local "ERROR" "$*"; }
+cprint(){ local c="$1"; shift; printf "%b%s%b\n" "$c" "$*" "$NC"; }
+die(){ error "$*"; exit 1; }
+sr(){ if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) $*"; else eval "$*"; fi }
 
-# Small helpers
-cprint() { local c="$1"; shift; printf "%b%s%b\n" "$c" "$*" "$NC"; }
-die() { error "$*"; exit 1; }
-sr() { if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) $*"; else eval "$*"; fi }
-
-# Read config (prefer yq)
-read_config() {
+read_config(){
   if [[ -n "$YQ" && -f "$CONFIG_FILE" ]]; then
     PARALLEL="$(yq e '.parallel_jobs // 1' "$CONFIG_FILE" 2>/dev/null || echo 1)"
     DEFAULT_STAGE="$(yq e '.default_stage // "normal"' "$CONFIG_FILE" 2>/dev/null || echo "normal")"
     CACHE_DIR_CFG="$(yq e '.cache_dir // ""' "$CONFIG_FILE" 2>/dev/null || echo "")"
     [[ -n "$CACHE_DIR_CFG" && "$CACHE_DIR_CFG" != "null" ]] && CACHE_DIR="$CACHE_DIR_CFG"
   else
-    # fallback: try simple awk parse
-    if [[ -f "$CONFIG_FILE" ]]; then
-      PARALLEL="$(awk -F: '/parallel_jobs/ {gsub(/ /,"",$2); print $2; exit}' "$CONFIG_FILE" 2>/dev/null || echo 1)"
-      DEFAULT_STAGE="$(awk -F: '/default_stage/ {gsub(/ /,"",$2); print $2; exit}' "$CONFIG_FILE" 2>/dev/null || echo "normal")"
-    else
-      PARALLEL=1
-      DEFAULT_STAGE="normal"
-    fi
+    PARALLEL=1; DEFAULT_STAGE="normal"
   fi
 }
 
-# Ensure directory structure
-ensure_dirs() {
+ensure_dirs(){
   local dirs=( "$ETC_DIR" "$LOG_DIR" "$CACHE_DIR" "$CACHE_DIR/sources" "$CACHE_DIR/packages" "$BACKUP_DIR" "$PORTS_DIR" "$BASE_SHARE/hooks" "/usr/share/newpkg/stages" )
   for d in "${dirs[@]}"; do
-    if [[ $DRY_RUN -eq 1 ]]; then
-      info "(dry-run) mkdir -p $d"
-    else
-      mkdir -p -- "$d"
-      chmod 0755 "$d" || true
-    fi
+    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) mkdir -p $d"; else mkdir -p -- "$d"; chmod 0755 "$d" || true; fi
   done
 }
 
-create_default_config() {
+create_default_config(){
   local cfg="$CONFIG_FILE"
-  if [[ -f "$cfg" ]]; then
-    info "Config already exists at $cfg"
-    return 0
-  fi
-  if [[ $DRY_RUN -eq 1 ]]; then
-    info "(dry-run) would create $cfg"
-    return 0
-  fi
+  if [[ -f "$cfg" ]]; then info "Config exists: $cfg"; return 0; fi
   mkdir -p "$(dirname "$cfg")"
   cat > "$cfg" <<EOF
 parallel_jobs: $(nproc 2>/dev/null || echo 1)
@@ -135,81 +91,54 @@ colors: true
 safe_chroot: true
 EOF
   chmod 0644 "$cfg"
-  info "Created default config at $cfg"
+  info "Created: $cfg"
 }
 
-install_shortcuts() {
+install_shortcuts(){
   for s in np pkg npg; do
     local dest="/usr/bin/$s"
-    if [[ -L "$dest" || -f "$dest" ]]; then
-      info "Shortcut $dest exists"
-      continue
-    fi
-    if [[ $DRY_RUN -eq 1 ]]; then
-      info "(dry-run) ln -s /usr/bin/newpkg $dest"
-    else
-      ln -s /usr/bin/newpkg "$dest" || warn "Could not create $dest"
-      info "Created shortcut $dest -> /usr/bin/newpkg"
-    fi
+    if [[ -e "$dest" ]]; then info "Shortcut $dest exists"; continue; fi
+    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) ln -s /usr/bin/newpkg $dest"; else ln -sf /usr/bin/newpkg "$dest"; fi
   done
 }
 
-check_prereqs() {
-  local miss=()
-  for cmd in jq tar sha256sum curl git yq; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then miss+=( "$cmd" ); fi
-  done
-  if [[ ${#miss[@]} -gt 0 ]]; then warn "Missing commands: ${miss[*]}. Some features will be degraded."; fi
+check_prereqs(){
+  local miss=(); for cmd in jq tar sha256sum curl git yq zstd fakeroot; do if ! command -v "$cmd" >/dev/null 2>&1; then miss+=( "$cmd" ); fi; done
+  if [[ ${#miss[@]} -gt 0 ]]; then warn "Missing tools: ${miss[*]}. Some features limited."; fi
 }
 
-# Ports helpers
-list_installed() {
+list_installed(){
   if [[ -x "$DB_SH" ]]; then
-    if [[ -n "$JQ" ]]; then
-      "$DB_SH" list --json 2>/dev/null | jq -r '.[] | "\(.name) \(.version) \(.install_date // "")"'
-    else
-      "$DB_SH" list
+    if [[ -n "$JQ" ]]; then "$DB_SH" list --json 2>/dev/null | jq -r '.[] | "\(.name) \(.version) \(.install_date // "")"' || true
+    else "$DB_SH" list || true
     fi
   else
-    warn "db.sh not present; scanning /usr/bin (best-effort)"
+    warn "db.sh missing; fallback best-effort"
     ls /usr/bin | head -n 200
   fi
 }
 
-# list /usr/ports entries and highlight installed
-list_ports_highlighted() {
-  # build installed set
+list_ports_highlighted(){
   declare -A INSTALLED=()
-  if [[ -x "$DB_SH" && -n "$JQ" ]]; then
-    mapfile -t arr < <("$DB_SH" list --json 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
-    for v in "${arr[@]}"; do INSTALLED["$v"]=1; done
-  fi
-
-  # find metafiles
+  if [[ -x "$DB_SH" && -n "$JQ" ]]; then mapfile -t arr < <("$DB_SH" list --json 2>/dev/null | jq -r '.[].name' 2>/dev/null || true); for v in "${arr[@]}"; do INSTALLED["$v"]=1; done; fi
   if [[ -n "$YQ" ]]; then
-    find "$PORTS_DIR" -maxdepth 4 -type f \( -iname 'meta.yaml' -o -iname 'meta.yml' -o -iname 'package.yaml' \) -print0 2>/dev/null | \
+    find "$PORTS_DIR" -maxdepth 4 -type f \( -iname 'metafile.yaml' -o -iname 'meta.yaml' \) -print0 2>/dev/null | \
     xargs -0 -n1 -P4 bash -c '
       f="$0"
-      name="$('"$YQ"' e '\''.name // .package // .pkgname // ""'\'' "$f" 2>/dev/null)"
+      nm="$('"$YQ"' e '\''.name // .package // .pkgname // ""'\'' "$f" 2>/dev/null)"
       ver="$('"$YQ"' e '\''.version // ""'\'' "$f" 2>/dev/null)"
-      if [[ -z "$name" || "$name" == "null" ]]; then name="$(basename "$(dirname "$f")")"; fi
-      printf "%s\t%s\t%s\n" "$name" "$ver" "$f"
+      if [[ -z "$nm" || "$nm" == "null" ]]; then nm="$(basename "$(dirname "$f")")"; fi
+      printf "%s\t%s\t%s\n" "$nm" "$ver" "$f"
     '
   else
     find "$PORTS_DIR" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | sed -E 's!.*/([^/]+)/([^/]+)$!\2\t\1!' | sort -u
   fi | while IFS=$'\t' read -r name ver file; do
-    if [[ -n "${INSTALLED[$name]:-}" ]]; then
-      printf "%b%-24s%b %s\n" "$GREEN" "$name" "$NC" "${ver:-}"
-    else
-      printf "%-24s %s\n" "$name" "${ver:-}"
-    fi
+    if [[ -n "${INSTALLED[$name]:-}" ]]; then printf "%b%-24s%b %s\n" "$GREEN" "$name" "$NC" "${ver:-}"; else printf "%-24s %s\n" "$name" "${ver:-}"; fi
   done
 }
 
-# search ports by term
-search_ports() {
-  local term="$1"
-  if [[ -z "$term" ]]; then die "search requires a term"; fi
+search_ports(){
+  local term="$1"; [[ -n "$term" ]] || die "search term required"
   if [[ -n "$YQ" ]]; then
     find "$PORTS_DIR" -type f -name '*.yaml' -o -name '*.yml' -print0 2>/dev/null | xargs -0 -n1 -P4 bash -c '
       f="$0"
@@ -224,195 +153,109 @@ search_ports() {
   fi
 }
 
-show_package_info() {
-  local pkg="$1"; [[ -n "$pkg" ]] || die "package name required"
-  # try ports metafile
+show_package_info(){
+  local pkg="$1"; [[ -n "$pkg" ]] || die "package required"
   if [[ -n "$YQ" ]]; then
     local mf
     mf="$(find "$PORTS_DIR" -type f \( -iname '*.yaml' -o -iname '*.yml' \) -exec grep -l -E "^name:.*${pkg}\$|^package:.*${pkg}\$" {} + 2>/dev/null | head -n1 || true)"
-    if [[ -n "$mf" ]]; then
-      cprint "$BLUE" "Metafile: $mf"
-      yq e '.' "$mf" || true
-      return 0
-    fi
+    if [[ -n "$mf" ]]; then cprint "$BLUE" "Metafile: $mf"; yq e '.' "$mf" || true; return 0; fi
   fi
-  # fallback to db.sh
-  if [[ -x "$DB_SH" ]]; then
-    "$DB_SH" query "$pkg" || warn "db.sh query returned nothing"
-    return 0
-  fi
-  warn "No metadata found for $pkg"
+  if [[ -x "$DB_SH" ]]; then "$DB_SH" query "$pkg" && return 0 || true; fi
+  warn "No metadata for $pkg"
   return 1
 }
 
-# dispatch actions to modules (calls)
-action_install() {
-  local pkgs=( "$@" )
-  [[ ${#pkgs[@]} -gt 0 ]] || die "no packages to install"
+# actions
+action_install(){
+  local pkgs=( "$@" ); [[ ${#pkgs[@]} -gt 0 ]] || die "no packages"
   if [[ -x "$DEPS_PY" ]]; then
-    info "Resolving dependencies..."
-    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) $DEPS_PY resolve ${pkgs[*]}"; else "$DEPS_PY" resolve "${pkgs[@]}" || warn "deps.py resolve returned non-zero"; fi
+    info "Resolving deps..."
+    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) deps.py resolve ${pkgs[*]}"; else "$DEPS_PY" resolve "${pkgs[@]}" || warn "deps.py returned nonzero"; fi
   fi
   for p in "${pkgs[@]}"; do
-    info "Installing: $p"
-    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) would call core.sh install $p"; else
-      if [[ -x "$CORE_SH" ]]; then
-        CORE_STAGE="${DEFAULT_STAGE:-normal}" "$CORE_SH" install "$p"
-      else
-        die "core.sh not found at $CORE_SH"
-      fi
+    info "Install: $p"
+    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) core.sh install $p"; else
+      if [[ -x "$CORE_SH" ]]; then CORE_STAGE="${DEFAULT_STAGE:-normal}" "$CORE_SH" install "$p"; else die "core.sh not found at $CORE_SH"; fi
     fi
   done
 }
 
-action_remove() {
-  local pkgs=( "$@" )
-  [[ ${#pkgs[@]} -gt 0 ]] || die "no packages to remove"
-  for p in "${pkgs[@]}"; do
-    info "Removing: $p"
-    if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) would call remove.sh $p"; else
-      if [[ -x "$REMOVE_SH" ]]; then "$REMOVE_SH" "$p"; else die "remove.sh not found at $REMOVE_SH"; fi
-    fi
+action_remove(){
+  local pkgs=( "$@" ); [[ ${#pkgs[@]} -gt 0 ]] || die "no packages"
+  for p in "${pkgs[@]}"; do info "Removing: $p"; if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) remove $p"; else if [[ -x "$REMOVE_SH" ]]; then "$REMOVE_SH" "$p"; else die "remove.sh missing"; fi; fi; done
+}
+
+action_upgrade(){ local args=( "$@" ); if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) upgrade ${args[*]}"; else if [[ -x "$UPGRADE_SH" ]]; then "$UPGRADE_SH" "${args[@]}"; else die "upgrade.sh missing"; fi; fi }
+
+action_sync(){ if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) sync"; else if [[ -x "$SYNC_SH" ]]; then "$SYNC_SH" "$@"; else warn "sync.sh missing"; fi; fi }
+
+action_deps(){ if [[ -x "$DEPS_PY" ]]; then "$DEPS_PY" "$@"; else warn "deps.py missing"; fi }
+
+action_audit(){ if [[ -x "$AUDIT_SH" ]]; then "$AUDIT_SH" "$@"; else warn "audit.sh missing"; fi }
+
+action_bootstrap(){ if [[ -x "$BOOTSTRAP_SH" ]]; then "$BOOTSTRAP_SH" "$@"; else warn "bootstrap.sh missing"; fi }
+
+action_revdep(){ if [[ -x "$REVDEP_SH" ]]; then "$REVDEP_SH" "$@"; else warn "revdep missing"; fi }
+
+action_query(){ show_package_info "$1"; }
+
+action_list_installed(){ info "Installed:"; list_installed | while IFS= read -r line; do cprint "$GREEN" "$line"; done }
+
+action_ports(){ info "Repo packages:"; list_ports_highlighted }
+
+action_search(){ search_ports "$1"; }
+
+action_init(){ info "Initializing..."; ensure_dirs; create_default_config; install_shortcuts; check_prereqs; info "Done." }
+
+action_show_audit_log(){ if [[ -f "$LOG_DIR/newpkg.log" ]]; then tail -n 200 "$LOG_DIR/newpkg.log"; else warn "no logs"; fi }
+
+# simple menu (same as earlier but trimmed)
+show_menu(){
+  while true; do
+    clear; cprint "$BOLD" "newpkg (v${VERSION})"; echo "1) Install  2) Remove  3) Upgrade  4) List installed  5) Ports  6) Search  7) Info  8) Sync 9) Audit 10) Bootstrap 11) Init 0) Exit"
+    read -r -p "Choice: " ch
+    case "$ch" in
+      1) read -r -p "Pkgs: " str; set -- $str; action_install "$@"; read -r -p "Press enter";;
+      2) read -r -p "Pkgs: " str; set -- $str; action_remove "$@"; read -r -p "Press enter";;
+      3) read -r -p "Pkgs (or blank all): " str; if [[ -z "$str" ]]; then action_upgrade --all; else set -- $str; action_upgrade "$@"; fi; read -r -p "Press enter";;
+      4) action_list_installed; read -r -p "Press enter";;
+      5) action_ports; read -r -p "Press enter";;
+      6) read -r -p "Term: " t; action_search "$t"; read -r -p "Press enter";;
+      7) read -r -p "Package: " p; action_query "$p"; read -r -p "Press enter";;
+      8) action_sync; read -r -p "Press enter";;
+      9) action_audit; read -r -p "Press enter";;
+      10) read -r -p "Stage(pass1|pass2|final|all): " s; if [[ "$s" == "all" ]]; then action_bootstrap --all; else action_bootstrap --run "$s"; fi; read -r -p "Press enter";;
+      11) action_init; read -r -p "Press enter";;
+      0) exit 0;;
+      *) echo "Invalid";;
+    esac
   done
 }
 
-action_upgrade() {
-  local args=( "$@" )
-  if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) would call upgrade.sh ${args[*]}"; else
-    if [[ -x "$UPGRADE_SH" ]]; then "$UPGRADE_SH" "${args[@]}"; else die "upgrade.sh not found at $UPGRADE_SH"; fi
-  fi
-}
-
-action_sync() {
-  if [[ $DRY_RUN -eq 1 ]]; then info "(dry-run) would run sync.sh"; else
-    if [[ -x "$SYNC_SH" ]]; then "$SYNC_SH" "$@"; else warn "sync.sh not found at $SYNC_SH"; fi
-  fi
-}
-
-action_deps() {
-  if [[ -x "$DEPS_PY" ]]; then "$DEPS_PY" "$@"; else warn "deps.py not found at $DEPS_PY"; fi
-}
-
-action_audit() {
-  if [[ -x "$AUDIT_SH" ]]; then "$AUDIT_SH" "$@"; else warn "audit.sh not found at $AUDIT_SH"; fi
-}
-
-action_bootstrap() {
-  if [[ -x "$BOOTSTRAP_SH" ]]; then "$BOOTSTRAP_SH" "$@"; else warn "bootstrap.sh not found at $BOOTSTRAP_SH"; fi
-}
-
-action_revdep() {
-  if [[ -x "$REVDEP_SH" ]]; then "$REVDEP_SH" "$@"; else warn "revdep_depclean.sh not found at $REVDEP_SH"; fi
-}
-
-action_query() { show_package_info "$1"; }
-
-action_list_installed() {
-  info "Installed packages:"
-  list_installed | while IFS= read -r line; do cprint "$GREEN" "$line"; done
-}
-
-action_ports() {
-  info "Repository packages (installed highlighted):"
-  list_ports_highlighted
-}
-
-action_search() { search_ports "$1"; }
-
-action_init() {
-  info "Initializing newpkg structure..."
-  ensure_dirs
-  create_default_config
-  install_shortcuts
-  check_prereqs
-  info "Initialization completed."
-}
-
-action_show_audit_log() {
-  if [[ -f "$LOG_DIR/newpkg.log" ]]; then
-    tail -n 200 "$LOG_DIR/newpkg.log"
-  else
-    warn "No newpkg logs at $LOG_DIR/newpkg.log"
-  fi
-}
-
-# Interactive menu (textual simple)
-show_menu() {
-  clear
-  cprint "$BOLD" "newpkg - LFS/BLFS package orchestrator (v${VERSION})"
-  echo "────────────────────────────────────────────────────────────"
-  echo "1) Install package(s)"
-  echo "2) Remove package(s)"
-  echo "3) Upgrade package(s)"
-  echo "4) List installed packages"
-  echo "5) List repository packages (/usr/ports)"
-  echo "6) Search repository"
-  echo "7) Show package info"
-  echo "8) Sync /usr/ports"
-  echo "9) Audit system"
-  echo "10) Bootstrap (stages)"
-  echo "11) Show newpkg logs"
-  echo "12) Initialize structure (--init)"
-  echo "0) Exit"
-  echo "────────────────────────────────────────────────────────────"
-  read -r -p "Choice: " ch
-  case "$ch" in
-    1) read -r -p "Packages (space-separated): " str; set -- $str; action_install "$@" ;;
-    2) read -r -p "Packages (space-separated): " str; set -- $str; action_remove "$@" ;;
-    3) read -r -p "Packages to upgrade (leave blank for --all): " str
-       if [[ -z "$str" ]]; then action_upgrade --all; else set -- $str; action_upgrade "$@"; fi ;;
-    4) action_list_installed ;;
-    5) action_ports ;;
-    6) read -r -p "Search term: " t; action_search "$t" ;;
-    7) read -r -p "Package name: " p; action_query "$p" ;;
-    8) action_sync ;;
-    9) action_audit ;;
-    10) read -r -p "Stage (pass1|pass2|final|all): " s
-        if [[ "$s" == "all" ]]; then action_bootstrap --all; else action_bootstrap --run "$s"; fi ;;
-    11) action_show_audit_log ;;
-    12) action_init ;;
-    0) exit 0 ;;
-    *) echo "Invalid choice";;
-  esac
-}
-
-# CLI parsing
-usage() {
+# parse CLI
+usage(){
   cat <<EOF
-newpkg - unified CLI (v${VERSION})
+newpkg CLI
 
-Usage:
-  newpkg [OPTIONS] COMMAND [ARGS...]
+Usage: newpkg [options] command
 
-Global options:
-  -n, --dry-run          simulate actions
-  -q, --quiet            minimal output
-  --auto                 non-interactive (assume yes)
-  --menu                 force interactive menu
-  --init                 create directories, config, symlinks
-  --help                 show this help
-
-Primary commands:
-  -i, --install PKG...   install package(s)
-  -r, --remove PKG...    remove package(s)
-  -u, --upgrade [PKG...] upgrade packages or --all
-  -s, --sync             sync /usr/ports
-  -b, --bootstrap ARG    forward to bootstrap.sh
-  -d, --deps ARGS        run deps.py
-  -a, --audit ARGS       run audit.sh
-  -l, --list             list installed packages
-  -p, --ports            list repo packages
-  --search TERM          search repo
-  -q, --query PKG        show package info
-  --revdep               run revdep_depclean.sh
-  --depclean             run revdep_depclean.sh --depclean
-  --resume               pass --resume downstream
-  --audit-log            show logs
-  --version              show version
+Common:
+  -n --dry-run   simulate
+  -q --quiet
+  -i|--install PKG...
+  -r|--remove PKG...
+  -u|--upgrade [PKG...]
+  -s|--sync
+  -b|--bootstrap
+  -d|--deps
+  -a|--audit
+  --init
+  --menu
 EOF
+  exit 1
 }
 
-# Parse args
+COMMAND=""; ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--dry-run) DRY_RUN=1; shift ;;
@@ -429,7 +272,7 @@ while [[ $# -gt 0 ]]; do
     -l|--list) COMMAND="list"; shift ;;
     -p|--ports) COMMAND="ports"; shift ;;
     --search) COMMAND="search"; shift; ARGS+=( "$1" ); shift ;;
-    -q|--query) COMMAND="query"; shift; ARGS+=( "$1" ); shift ;;
+    --query) COMMAND="query"; shift; ARGS+=( "$1" ); shift ;;
     --revdep) COMMAND="revdep"; shift ;;
     --depclean) COMMAND="depclean"; shift ;;
     --init) COMMAND="init"; shift ;;
@@ -441,10 +284,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Load config
 read_config
 
-# execute
 case "$COMMAND" in
   ""|"menu") show_menu ;;
   install) action_install "${ARGS[@]}" ;;
@@ -464,5 +305,3 @@ case "$COMMAND" in
   "audit-log") action_show_audit_log ;;
   *) usage; exit 1 ;;
 esac
-
-EOF
