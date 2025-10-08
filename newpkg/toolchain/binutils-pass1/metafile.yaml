@@ -1,0 +1,129 @@
+# ==============================================================================
+# metafile.yaml — Binutils (Pass 1)
+# Local: /usr/ports/toolchain/binutils-pass1/metafile.yaml
+# Compatível com LFS 12.x — Etapa Toolchain inicial
+# ==============================================================================
+
+# 🏷️ Identificação do pacote
+name: binutils-pass1
+version: 2.43.1
+release: 1
+epoch: 0
+category: toolchain
+summary: "Binutils - Pass 1 (toolchain inicial)"
+description: |
+  Este pacote compila o conjunto de ferramentas Binutils (assembler, linker,
+  etc.) para o ambiente de construção inicial do LFS (Pass 1).
+  Ele é usado para criar o toolchain isolado em /mnt/lfs/tools e será
+  substituído pelo Binutils Pass 2 posteriormente.
+
+# 🧩 Estágio
+stage: pass1
+
+# 🌐 Fontes
+source:
+  - https://ftp.gnu.org/gnu/binutils/binutils-2.43.1.tar.xz
+  - https://ftpmirror.gnu.org/binutils/binutils-2.43.1.tar.xz
+
+checksums:
+  sha256: 4e5185ebc501fb31cf7d223a6c91162e8b7e77f67fb4d5c8e6e5b04d0e8c7d47
+
+build_dir: binutils-2.43.1
+
+# 📦 Ambiente
+environment:
+  LFS: "/mnt/lfs"
+  LFS_TGT: "$(uname -m)-lfs-linux-gnu"
+  PATH: "/mnt/lfs/tools/bin:/usr/bin:/bin"
+  CONFIG_SITE: "/usr/share/config.site"
+  MAKEFLAGS: "-j$(nproc)"
+  SHELL: "/bin/bash"
+  LANG: "C.UTF-8"
+  LC_ALL: "POSIX"
+
+# 🧱 Dependências
+depends:
+  build:
+    - gcc
+    - glibc
+  runtime:
+    - bash
+
+bootstrap_tools:
+  - gcc
+  - make
+  - coreutils
+
+# 📜 Instruções de construção (do LFS)
+build:
+  - mkdir -pv build
+  - cd build
+  - ../configure \
+        --prefix=/mnt/lfs/tools \
+        --with-sysroot=/mnt/lfs \
+        --target=$LFS_TGT \
+        --disable-nls \
+        --enable-gprofng=no \
+        --disable-werror
+  - make
+
+# 📥 Instalação
+install:
+  - make install
+  - install -vdm755 /mnt/lfs/tools/lib && ln -sv lib /mnt/lfs/tools/lib64 || true
+
+# 📜 Testes (omitidos no Pass 1 para acelerar a build)
+test: []
+
+# 🧹 Limpeza
+cleanup:
+  - rm -rf $PWD/build
+
+# 🧷 Hooks (opcionais)
+hooks:
+  pre_build: scripts/pre-build.sh
+  post_build: scripts/post-build.sh
+  post_install: scripts/post-install.sh
+
+# 🧾 Metadata
+metadata:
+  maintainer: "Fernando Canata <fernando@example.org>"
+  license: GPL-3.0-or-later
+  homepage: https://www.gnu.org/software/binutils/
+  repository: https://www.linuxfromscratch.org/lfs/view/stable/
+  section: "Toolchain Stage 1"
+
+# ⚙️ Políticas específicas
+build_policy:
+  continue_on_error: false
+  sandbox: true
+  fakeroot: false
+  require_chroot: true
+  run_as_user: lfs
+  preserve_env: false
+  isolated_env: true
+
+# 🔒 Segurança
+security:
+  sandbox: true
+  drop_privileges: true
+  forbid_root_build: true
+  restricted_network: true
+
+# 🧩 Empacotamento
+package:
+  format: tar.zst
+  compression_level: 19
+  output_dir: /mnt/lfs/packages
+  include_docs: false
+  include_manpages: false
+  include_locales: false
+
+# 🧾 Notas
+notes: |
+  Binutils Pass 1 deve ser construído antes do GCC Pass 1.
+  O diretório /mnt/lfs/tools deve estar criado e no PATH antes do build.
+  O usuário 'lfs' deve ter permissão de escrita em /mnt/lfs/tools.
+
+  Comando recomendado de build:
+    sudo -u lfs newpkg --config /etc/newpkg/newpkg_lfs.yaml install binutils-pass1
