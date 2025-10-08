@@ -181,6 +181,11 @@ Comandos e abreviações
 --------------------
 sudo newpkg --config /etc/newpkg/newpkg_lfs.yaml install binutils gcc glibc
 sudo newpkg --config /etc/newpkg/newpkg_lfs.yaml bootstrap --run pass1 
+sudo mkdir -p /etc/newpkg
+sudo tee /etc/newpkg/newpkg_lfs.yaml > /dev/null <<'EOF'
+[cole aqui o conteúdo completo acima]
+EOF
+sudo chmod 0644 /etc/newpkg/newpkg_lfs.yaml
 ------------------------------------------------------------
 Menu textual
 ------------------------------------------------------------
