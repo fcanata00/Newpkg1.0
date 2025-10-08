@@ -1,0 +1,10 @@
+sync:
+  parallel_jobs: 2
+  repos:
+    - name: official
+      url: "https://github.com/someuser/someports.git"
+      branch: main
+      dest: /tmp/ports-official
+  cache:
+    enable: false
+    dest: /tmp/newpkg-cache
