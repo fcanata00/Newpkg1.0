@@ -186,6 +186,8 @@ sudo tee /etc/newpkg/newpkg_lfs.yaml > /dev/null <<'EOF'
 [cole aqui o conteúdo completo acima]
 EOF
 sudo chmod 0644 /etc/newpkg/newpkg_lfs.yaml
+
+sudo -u lfs newpkg --config /etc/newpkg/newpkg_lfs.yaml install binutils-pass1
 ------------------------------------------------------------
 Menu textual
 ------------------------------------------------------------
