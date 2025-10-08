@@ -1,10 +1,126 @@
-sync:
-  parallel_jobs: 2
-  repos:
-    - name: official
-      url: "https://github.com/someuser/someports.git"
-      branch: main
-      dest: /tmp/ports-official
-  cache:
-    enable: false
-    dest: /tmp/newpkg-cache
+# ==============================================================================
+# newpkg.yaml - Arquivo principal de configuração do Newpkg
+# Caminho: /etc/newpkg/newpkg.yaml
+# ==============================================================================
+
+# Número de tarefas paralelas durante o build.
+# Pode ser sobrescrito com: newpkg --parallel <N>
+parallel_jobs: 4
+
+# Estágio padrão de construção:
+#  - normal  → pacotes de sistema instalados em "/"
+#  - pass1   → bootstrap inicial (toolchain em /mnt/lfs)
+#  - pass2   → segunda fase de toolchain
+default_stage: normal
+
+# Diretórios principais
+paths:
+  # Repositório de pacotes (metafiles)
+  repo_dir: /usr/ports
+
+  # Cache de fontes (arquivos .tar.xz, .tar.zst, etc.)
+  source_cache: /var/cache/newpkg/sources
+
+  # Cache de pacotes binários empacotados
+  package_cache: /var/cache/newpkg/packages
+
+  # Diretório de trabalho (build temporário)
+  build_root: /build/newpkg
+
+  # Diretório raiz do LFS (usado nos estágios pass1/pass2)
+  lfs_root: /mnt/lfs
+
+  # Logs de compilação e eventos
+  log_dir: /var/log/newpkg
+
+  # Banco de dados de pacotes instalados
+  db_dir: /var/lib/newpkg/db
+
+  # Estado atual de filas e builds
+  state_dir: /var/lib/newpkg/state
+
+# Diretórios de hooks globais (executados antes/depois de certas ações)
+hooks:
+  pre_download: /etc/newpkg/hooks/core/pre-download/
+  post_download: /etc/newpkg/hooks/core/post-download/
+  pre_build: /etc/newpkg/hooks/core/pre-build/
+  post_build: /etc/newpkg/hooks/core/post-build/
+  pre_install: /etc/newpkg/hooks/core/pre-install/
+  post_install: /etc/newpkg/hooks/core/post-install/
+  pre_remove: /etc/newpkg/hooks/core/pre-remove/
+  post_remove: /etc/newpkg/hooks/core/post-remove/
+
+# Configuração do Chroot
+chroot:
+  enabled: true            # Se true, ativa build isolado em chroot
+  safe_mount: true         # Monta apenas /dev, /proc, /sys, /run e copia resolv.conf
+  persistent: true         # Mantém chroot montado durante múltiplos pacotes da mesma fila
+  user: lfs                # Usuário padrão para estágios pass1/pass2
+
+# Política de Logs
+logging:
+  color_output: true       # Usa cores ANSI nos logs
+  timestamps: true         # Prefixa logs com horário UTC
+  keep_history: true       # Mantém logs antigos em /var/log/newpkg/builds/
+  summary_log: true        # Gera /var/log/newpkg/build-summary.log
+
+# Política de Auditoria e Recuperação
+audit:
+  auto_selfcheck: true     # Roda "newpkg_audit.sh --selfcheck" antes de qualquer build
+  auto_recover: true       # Tenta reinstalar pacotes quebrados a partir do cache
+  auto_clean_logs: true    # Remove logs antigos acima de N dias
+  keep_days: 30
+
+# Opções de Repositório (para sync.sh)
+repo:
+  git_url: https://github.com/usuario/ports.git   # repositório remoto
+  branch: main
+  auto_commit: true
+  parallel_sync: true
+  quiet_mode: false
+  dry_run: false
+
+# Configurações do gerenciador de dependências (deps.py)
+deps:
+  solver: networkx          # Usa networkx para resolver dependências
+  interactive: true         # Pergunta antes de remover dependências
+  export_json: true         # Salva grafo em /var/lib/newpkg/graph.json
+  export_csv: false         # Desabilite se quiser economizar tempo
+  cache_graph: true         # Mantém cache local de dependências resolvidas
+
+# Comportamento padrão de build
+build:
+  continue_on_error: false   # Para imediatamente no primeiro erro
+  auto_resume: true          # Retoma automaticamente builds interrompidos
+  clean_workdir: true        # Limpa diretórios de trabalho entre pacotes
+  compress_format: .tar.zst  # Formato padrão de empacotamento
+  fakeroot: true             # Usa fakeroot em todos os installs
+  patch_support: true        # Aplica patches definidos no metafile
+  hooks_enabled: true        # Ativa execução de hooks locais e globais
+
+# Aparência
+ui:
+  theme: "default"
+  color_scheme:
+    success: green
+    warning: yellow
+    error: red
+    info: blue
+  show_menu_tips: true
+
+# Limpeza automática
+cleanup:
+  clean_temp_after_build: true
+  clean_failed_packages: false
+  clean_cache_days: 45
+
+# Configuração do doctor/audit integrado
+doctor:
+  check_orphans: true
+  check_symlinks: true
+  check_permissions: true
+  fix_broken_links: true
+  verify_installed_files: true
+  fix_from_cache: true
+  auto_log: true
+  log_path: /var/log/newpkg/audit.log
